@@ -43,41 +43,55 @@ object TextUtility {
             .replace("&#([A-Fa-f0-9]{6})".toRegex(), "<color:#$1>")
     }
 
+    /**
+     * Word-wraps [text] to at most [maxLineLength] characters per line (spaces included).
+     *
+     * Uses standard greedy wrapping, then tightens the effective width so the same number of
+     * lines share length more evenly (avoids a long final line with a short remainder dumped on it).
+     * A single word longer than [maxLineLength] is kept on its own line unsplit.
+     */
     fun splitIntoLines(text: String, maxLineLength: Int): List<String> {
-        val words = text.split("\\s+".toRegex())
-        val lines = mutableListOf<String>()
+        require(maxLineLength > 0) { "maxLineLength must be positive" }
+        val words = text.trim().split("\\s+".toRegex()).filter { it.isNotEmpty() }
+        if (words.isEmpty()) return emptyList()
 
-        val totalSymbolLength = text.length
-        val minLinesNeeded = (totalSymbolLength / maxLineLength) +
-            if (totalSymbolLength % maxLineLength != 0) 1 else 0
+        val greedyLines = wrapGreedy(words, maxLineLength)
+        if (greedyLines.size <= 1) return greedyLines
 
-        val averageSymbolLengthPerLine = totalSymbolLength / minLinesNeeded
-
-        var currentLine = StringBuilder()
-        var currentSymbolLength = 0
-        var remainingLines = minLinesNeeded
-
-        for (word in words) {
-            if (currentLine.isEmpty()) {
-                currentLine.append(word)
-                currentSymbolLength += word.length
-            } else if (currentSymbolLength + word.length + 1 <= averageSymbolLengthPerLine ||
-                remainingLines == 1
-            ) {
-                currentLine.append(" ").append(word)
-                currentSymbolLength += word.length + 1
+        var low = 1
+        var high = maxLineLength
+        var bestWidth = maxLineLength
+        while (low <= high) {
+            val mid = (low + high) / 2
+            if (wrapGreedy(words, mid).size <= greedyLines.size) {
+                bestWidth = mid
+                high = mid - 1
             } else {
-                lines.add(currentLine.toString())
-                currentLine = StringBuilder(word)
-                currentSymbolLength = word.length
-                remainingLines--
+                low = mid + 1
             }
         }
+        return wrapGreedy(words, bestWidth)
+    }
 
-        if (currentLine.isNotEmpty()) {
-            lines.add(currentLine.toString())
+    private fun wrapGreedy(words: List<String>, maxLineLength: Int): List<String> {
+        val lines = mutableListOf<String>()
+        var current = StringBuilder()
+
+        for (word in words) {
+            if (current.isEmpty()) {
+                current.append(word)
+                continue
+            }
+            if (current.length + 1 + word.length <= maxLineLength) {
+                current.append(' ').append(word)
+            } else {
+                lines.add(current.toString())
+                current = StringBuilder(word)
+            }
         }
-
+        if (current.isNotEmpty()) {
+            lines.add(current.toString())
+        }
         return lines
     }
 }

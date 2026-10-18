@@ -2,6 +2,8 @@
 
 This repo is **SneakyUtils**, a shared Paper plugin (Kotlin + Java, Paper 26.2, Gradle) that other Team-Sneakymouse plugins depend on for utilities and in-memory managers. It has no configuration or commands — bootstrap only enables managers/listeners.
 
+Team policy for when consumers must **use** or **contribute** here: `../team-development-policy/policy/sneakyutils.md` (in the LoM workspace) or the same path under an installed `.team-policy/` payload.
+
 ## Commands
 
 | Task | Command |

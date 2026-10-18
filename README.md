@@ -55,4 +55,4 @@ Public Team-Sneakymouse repositories inherit organization Infisical secrets. Pri
 
 ## Agent / LLM instructions
 
-Point your tool’s project instructions at **[AGENTS.md](./AGENTS.md)**.
+Point your tool’s project instructions at **[AGENTS.md](./AGENTS.md)**. Team-wide use/contribute rules live in [team-development-policy/policy/sneakyutils.md](../team-development-policy/policy/sneakyutils.md).

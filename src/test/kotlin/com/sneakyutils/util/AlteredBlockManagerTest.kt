@@ -1,4 +1,4 @@
-package com.sneakyutils.manager
+package com.sneakyutils.util
 
 import com.sneakyutils.SneakyUtils
 import org.bukkit.Material

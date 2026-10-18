@@ -1,4 +1,4 @@
-package com.sneakyutils.manager;
+package com.sneakyutils.util;
 
 import org.bukkit.block.Block;
 import org.bukkit.entity.Entity;

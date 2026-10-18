@@ -27,6 +27,6 @@ class SneakyUtilsTest {
         assertTrue(plugin.isEnabled)
         assertNotNull(SneakyUtils.instance)
         assertNotNull(SneakyUtils.getAlteredBlockManager())
-        assertEquals(SneakyUtils.ALTERED_BLOCK_TAG, "SU_ALTERED_BLOCK")
+        assertEquals(SneakyUtils.ALTERED_BLOCK_TAG, "sneakyutils_altered_block")
     }
 }

@@ -1,6 +1,6 @@
 # Agent instructions (Team Sneakymouse / Lords of Minecraft)
 
-This repo is **SneakyUtils**, a shared Paper plugin (Kotlin + Java, Paper 26.2, Gradle) that other Team-Sneakymouse plugins depend on for utilities and in-memory managers.
+This repo is **SneakyUtils**, a shared Paper plugin (Kotlin + Java, Paper 26.2, Gradle) that other Team-Sneakymouse plugins depend on for utilities and in-memory managers. It has no configuration or commands — bootstrap only enables managers/listeners.
 
 ## Commands
 
@@ -17,20 +17,20 @@ Builds require a **git checkout** with at least one commit (version is derived f
 ## Architecture (keep plugins testable)
 
 ```text
-src/main/kotlin/<package>/
-  SneakyUtils.kt       # Bootstrap only: config, register commands/listeners, managers
-  util/                # Pure / Bukkit-native static helpers (see TextUtility)
-  commands/            # Thin adapters
-src/main/java/<package>/
-  manager/             # Stateful managers (see AlteredBlockManager)
-src/test/kotlin/<package>/   # Mirror packages; *Test.kt next to the unit under test
+src/main/kotlin/com/sneakyutils/
+  SneakyUtils.kt       # Bootstrap only: construct managers, register listeners
+  util/TextUtility.kt  # Pure / Bukkit-native static helpers
+src/main/java/com/sneakyutils/
+  util/                # Stateful shared managers (AlteredBlockManager, listener)
+src/test/kotlin/com/sneakyutils/   # Mirror packages; *Test.kt next to the unit under test
 ```
 
 Guidelines:
 
 - Prefer constructor parameters (`JavaPlugin`, services) so tests stay simple.
-- Classes loaded by MockBukkit (plugin, commands) must be **`open`** in Kotlin.
+- Classes loaded by MockBukkit (plugin) must be **`open`** in Kotlin.
 - Consumers load this plugin at runtime and use `compileOnly("io.github.team-sneakymouse:sneakyutils:…")`.
+- Marker PDC keys use the plugin NamespacedKey namespace (`sneakyutils:`); scoreboard tag is `sneakyutils_altered_block`.
 
 ## Testing policy (required)
 

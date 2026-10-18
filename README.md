@@ -7,7 +7,7 @@ This is a live Paper plugin (not a compile-only library). Install the JAR on the
 ## What’s included (v1)
 
 - `TextUtility` — legacy `&`/`§` → MiniMessage → Adventure `Component`, plus light line wrapping
-- `AlteredBlockManager` — reversible temporary block changes with persistent Marker fallback (scoreboard tag `SU_ALTERED_BLOCK`)
+- `AlteredBlockManager` — reversible temporary block changes with persistent Marker fallback (scoreboard tag `sneakyutils_altered_block`, PDC keys under `sneakyutils:`)
 
 ## Consumer usage
 
@@ -28,10 +28,6 @@ dependencies {
 ```
 
 Ensure `SneakyUtils` is installed and loads before plugins that call `SneakyUtils.getAlteredBlockManager()`.
-
-## Plugin reload
-
-Run `/sneakyutils reload` in-game or `sneakyutils reload` from the console to re-read `plugins/SneakyUtils/config.yml`. The permission is `sneakyutils.command.reload` (default: operators).
 
 ## Versioning
 

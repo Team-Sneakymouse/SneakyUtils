@@ -1,16 +1,14 @@
 package com.sneakyutils
 
-import com.sneakyutils.commands.ReloadCommand
-import com.sneakyutils.manager.AlteredBlockListener
-import com.sneakyutils.manager.AlteredBlockManager
-import io.papermc.paper.plugin.lifecycle.event.types.LifecycleEvents
+import com.sneakyutils.util.AlteredBlockListener
+import com.sneakyutils.util.AlteredBlockManager
 import org.bukkit.plugin.java.JavaPlugin
 
 open class SneakyUtils : JavaPlugin() {
 
     companion object {
         const val IDENTIFIER = "sneakyutils"
-        const val ALTERED_BLOCK_TAG = "SU_ALTERED_BLOCK"
+        const val ALTERED_BLOCK_TAG = "sneakyutils_altered_block"
 
         lateinit var instance: SneakyUtils
             private set
@@ -32,19 +30,9 @@ open class SneakyUtils : JavaPlugin() {
     }
 
     override fun onEnable() {
-        saveDefaultConfig()
         alteredBlockManager = AlteredBlockManager(this)
         server.pluginManager.registerEvents(AlteredBlockListener(), this)
-        reloadPlugin()
-        lifecycleManager.registerEventHandler(LifecycleEvents.COMMANDS) { event ->
-            event.registrar().register(ReloadCommand(this).create(), "Reload the plugin configuration")
-        }
         logger.info("SneakyUtils enabled.")
-    }
-
-    /** Shared configuration entry point for startup and reload. */
-    fun reloadPlugin() {
-        reloadConfig()
     }
 
     override fun onDisable() {

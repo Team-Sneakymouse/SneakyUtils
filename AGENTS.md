@@ -21,7 +21,7 @@ src/main/kotlin/com/sneakyutils/
   SneakyUtils.kt       # Bootstrap only: construct managers, register listeners
   util/TextUtility.kt  # Pure / Bukkit-native static helpers
 src/main/java/com/sneakyutils/
-  util/                # Stateful shared managers (AlteredBlockManager, listener)
+  util/                # Shared Java helpers + AlteredBlockManager/listener; prefer static Bukkit-native APIs
 src/test/kotlin/com/sneakyutils/   # Mirror packages; *Test.kt next to the unit under test
 ```
 

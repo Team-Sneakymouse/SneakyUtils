@@ -6,8 +6,9 @@ This is a live Paper plugin (not a compile-only library). Install the JAR on the
 
 ## What’s included (v1)
 
-- `TextUtility` — legacy `&`/`§` → MiniMessage → Adventure `Component`, plus light line wrapping
+- `TextUtility` — legacy `&`/`§` → MiniMessage → Adventure `Component`, plus balanced line wrapping
 - `AlteredBlockManager` — reversible temporary block changes with persistent Marker fallback (scoreboard tag `sneakyutils_altered_block`, PDC keys under `sneakyutils:`)
+- MagicsSpells-ported static helpers under `com.sneakyutils.util`: location/XP/color/params, attribute/particle/sound/potion name resolution, geometry (`BoundingBox` / `bounds`), `AtomicFiles`, and small Bukkit/stdlib helpers (`BooleanUtils`, `RegexUtil`, `TimeUtil`, `EntityUtil`, `MobUtil`, `IntMap`, …)
 
 ## Consumer usage
 

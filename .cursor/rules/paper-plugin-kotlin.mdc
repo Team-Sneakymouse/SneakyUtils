@@ -1,0 +1,9 @@
+---
+description: Paper plugin layout and testability (Kotlin)
+globs: src/**/*.kt
+alwaysApply: false
+---
+
+# Paper plugin (Kotlin)
+
+Follow the architecture and testing sections in [AGENTS.md](../../AGENTS.md).

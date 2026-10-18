@@ -1,0 +1,11 @@
+name: SneakyUtils
+version: '${version}'
+main: com.sneakyutils.SneakyUtils
+description: Shared Paper utilities and managers for Team-Sneakymouse / Lords of Minecraft plugins.
+api-version: '26.2'
+authors: [Team Sneakymouse]
+website: https://github.com/Team-Sneakymouse/SneakyUtils
+permissions:
+  sneakyutils.command.reload:
+    description: Reload the plugin configuration.
+    default: op

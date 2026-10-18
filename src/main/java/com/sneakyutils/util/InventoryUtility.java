@@ -14,12 +14,14 @@ import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.util.io.BukkitObjectInputStream;
 import org.bukkit.util.io.BukkitObjectOutputStream;
-import org.yaml.snakeyaml.external.biz.base64Coder.Base64Coder;
 
 /**
  * Inventory serialization helpers (Paper YAML primary, legacy BukkitObject Base64, Paper per-item Base64).
  */
 public final class InventoryUtility {
+
+	/** Decodes Base64 that may include legacy line wrapping / whitespace (old SnakeYAML Base64Coder). */
+	private static final Base64.Decoder LEGACY_BASE64 = Base64.getMimeDecoder();
 
 	private InventoryUtility() {
 	}
@@ -112,7 +114,7 @@ public final class InventoryUtility {
 			if (s == null || s.isEmpty()) {
 				result.add(new ItemStack(Material.AIR));
 			} else {
-				result.add(ItemStack.deserializeBytes(Base64Coder.decode(s)));
+				result.add(ItemStack.deserializeBytes(LEGACY_BASE64.decode(s)));
 			}
 		}
 		return result;
@@ -131,7 +133,8 @@ public final class InventoryUtility {
 				dataOutput.writeObject(i < items.length ? items[i] : null);
 			}
 			dataOutput.close();
-			return Base64Coder.encodeLines(outputStream.toByteArray());
+			// MIME encoder keeps legacy line wrapping compatible with old Base64Coder.encodeLines data.
+			return Base64.getMimeEncoder().encodeToString(outputStream.toByteArray());
 		} catch (Exception e) {
 			throw new IllegalStateException("Could not convert inventory to base64.", e);
 		}
@@ -143,7 +146,7 @@ public final class InventoryUtility {
 
 	public static ItemStack[] getSavedInventoryStrict(String data) throws IOException {
 		try {
-			ByteArrayInputStream inputStream = new ByteArrayInputStream(Base64Coder.decodeLines(data));
+			ByteArrayInputStream inputStream = new ByteArrayInputStream(LEGACY_BASE64.decode(data));
 			try (BukkitObjectInputStream dataInput = new BukkitObjectInputStream(inputStream)) {
 				int size = dataInput.readInt();
 				if (size < 0 || size > 54) {

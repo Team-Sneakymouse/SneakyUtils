@@ -69,6 +69,25 @@ class Wave2UtilTest {
     }
 
     @Test
+    fun inventoryUtility_roundTripsPaperPerItemBase64() {
+        MockBukkit.mock()
+        try {
+            val inventory = org.bukkit.Bukkit.createInventory(null, 9)
+            inventory.setItem(0, ItemStack(Material.DIAMOND, 4))
+            inventory.setItem(2, ItemStack(Material.STONE, 1))
+            val encoded = InventoryUtility.inventoryPaperToBase64(inventory)
+            val restored = InventoryUtility.inventoryPaperFromBase64(encoded)
+            assertEquals(9, restored.size)
+            assertEquals(Material.DIAMOND, restored[0].type)
+            assertEquals(4, restored[0].amount)
+            assertEquals(Material.AIR, restored[1].type)
+            assertEquals(Material.STONE, restored[2].type)
+        } finally {
+            MockBukkit.unmock()
+        }
+    }
+
+    @Test
     fun itemMetaText_setsDisplayName() {
         MockBukkit.mock()
         try {

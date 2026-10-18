@@ -1,0 +1,15 @@
+package com.sneakyutils.util
+
+object TimeUtil {
+
+    const val TICKS_PER_SECOND = 20
+    const val MILLISECONDS_PER_SECOND = 1000L
+    const val SECONDS_PER_MINUTE = 60L
+    const val MINUTES_PER_HOUR = 60L
+    const val MILLISECONDS_PER_MINUTE = MILLISECONDS_PER_SECOND * SECONDS_PER_MINUTE
+    const val MILLISECONDS_PER_HOUR = MILLISECONDS_PER_MINUTE * MINUTES_PER_HOUR
+    const val HOURS_PER_DAY = 24L
+    const val DAYS_PER_WEEK = 7L
+    const val HOURS_PER_WEEK = HOURS_PER_DAY * DAYS_PER_WEEK
+    const val TICKS_PER_MINUTE = (TICKS_PER_SECOND * SECONDS_PER_MINUTE).toInt()
+}

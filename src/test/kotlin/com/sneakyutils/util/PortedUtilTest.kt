@@ -54,9 +54,9 @@ class PortedUtilTest {
     @Test
     fun attributeSpecParser_parsesLine() {
         val spec = AttributeSpecParser.parse("generic.max_health 2 add_number", false)
-        assertEquals("generic.max_health", spec.attributeName())
-        assertEquals(2.0, spec.amount(), 0.0)
-        assertEquals("add_number", spec.operationName())
+        assertEquals("generic.max_health", spec.attributeName)
+        assertEquals(2.0, spec.amount, 0.0)
+        assertEquals("add_number", spec.operationName)
     }
 
     @Test

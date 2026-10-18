@@ -42,13 +42,13 @@ class Wave2UtilTest {
     fun inventoryUtility_roundTripsPaperYaml() {
         val server: ServerMock = MockBukkit.mock()
         try {
-            val items = arrayOf(ItemStack(Material.DIAMOND, 3), null, ItemStack(Material.STONE))
+            val items = arrayOf<ItemStack?>(ItemStack(Material.DIAMOND, 3), null, ItemStack(Material.STONE))
             val yaml = InventoryUtility.inventoryToPaperYaml(items)
             assertTrue(InventoryUtility.looksLikePaperYaml(yaml))
             val restored = InventoryUtility.inventoryFromPaperYaml(yaml)
-            assertEquals(3, restored[0].amount)
-            assertEquals(Material.DIAMOND, restored[0].type)
-            assertEquals(Material.STONE, restored[2].type)
+            assertEquals(3, restored[0]!!.amount)
+            assertEquals(Material.DIAMOND, restored[0]!!.type)
+            assertEquals(Material.STONE, restored[2]!!.type)
         } finally {
             MockBukkit.unmock()
         }
@@ -58,11 +58,11 @@ class Wave2UtilTest {
     fun inventoryUtility_roundTripsLegacyBase64() {
         MockBukkit.mock()
         try {
-            val items = arrayOf(ItemStack(Material.APPLE, 2), ItemStack(Material.AIR))
+            val items = arrayOf<ItemStack?>(ItemStack(Material.APPLE, 2), ItemStack(Material.AIR))
             val encoded = InventoryUtility.inventoryToBase64(items.size, items)
             val restored = InventoryUtility.getSavedInventoryStrict(encoded)
             assertArrayEquals(arrayOf(Material.APPLE, Material.AIR), restored.map { it?.type }.toTypedArray())
-            assertEquals(2, restored[0].amount)
+            assertEquals(2, restored[0]!!.amount)
         } finally {
             MockBukkit.unmock()
         }

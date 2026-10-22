@@ -2,7 +2,7 @@
 
 This repo is **SneakyUtils**, a shared Paper plugin (Kotlin + Java, Paper 26.2, Gradle) that other Team-Sneakymouse plugins depend on for utilities and in-memory managers. It has no configuration or commands — bootstrap only enables managers/listeners.
 
-Team policy for when consumers must **use** or **contribute** here: `../team-development-policy/policy/sneakyutils.md` (in the LoM workspace) or the same path under an installed `.team-policy/` payload.
+Team policy for when consumers must **use** or **contribute** here: `../team-development-policy/policy/sneakyutils.md` (in the LoM workspace) or the same path under an installed `.team-policy/` payload. For substantial Paper features, persistent world state, or changes spanning components, also follow `../team-development-policy/policy/paper-plugin-maintainability.md` (or the corresponding installed policy path).
 
 ## Commands
 
@@ -45,7 +45,7 @@ MockBukkit lifecycle in every MockBukkit test class:
 - `@BeforeEach`: `MockBukkit.mock()`
 - `@AfterEach`: `MockBukkit.unmock()`
 
-Skipped tests from unimplemented MockBukkit APIs are acceptable; failing tests are not.
+Failing tests are not acceptable. A skipped test does not demonstrate the behavior it skips; use a pure test or suitable integration evidence when MockBukkit lacks a needed API, and report any remaining gap.
 
 ## Definition of done
 

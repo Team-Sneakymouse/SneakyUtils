@@ -9,9 +9,20 @@ import net.kyori.adventure.text.minimessage.MiniMessage
  */
 object TextUtility {
 
+    private val unicodeEscape = Regex("""\\u([0-9a-fA-F]{4})|\\U([0-9a-fA-F]{8})""")
+
     fun convertToComponent(message: String): Component {
+        val decoded = unicodeEscape.replace(message) { match ->
+            val hex = match.groups[1]?.value ?: match.groupValues[2]
+            val codePoint = hex.toLong(16)
+            if (codePoint <= Character.MAX_CODE_POINT) {
+                String(Character.toChars(codePoint.toInt()))
+            } else {
+                match.value
+            }
+        }
         return MiniMessage.miniMessage()
-            .deserialize(replaceFormatCodes(message))
+            .deserialize(replaceFormatCodes(decoded))
             .decoration(TextDecoration.ITALIC, false)
     }
 

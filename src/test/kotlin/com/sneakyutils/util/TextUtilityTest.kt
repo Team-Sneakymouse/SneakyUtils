@@ -1,11 +1,48 @@
 package com.sneakyutils.util
 
+import net.kyori.adventure.text.format.TextDecoration
+import net.kyori.adventure.text.minimessage.MiniMessage
 import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 
 class TextUtilityTest {
+
+    @Test
+    fun convertToComponent_decodesBadgeEscapesWhilePreservingFontAndFollowingName() {
+        for (badge in listOf("005", "055", "555")) {
+            val glyph = ("E$badge".toInt(16)).toChar()
+            val expected = MiniMessage.miniMessage()
+                .deserialize("<font:lom:badges>$glyph</font> <gold>Name")
+                .decoration(TextDecoration.ITALIC, false)
+            val actual = TextUtility.convertToComponent("<font:lom:badges>\\uE$badge</font> &6Name")
+
+            assertEquals(expected, actual, "badge $badge must decode without changing font scope")
+            assertEquals("$glyph Name", PlainTextComponentSerializer.plainText().serialize(actual))
+        }
+    }
+
+    @Test
+    fun convertToComponent_decodesLongEscapesAndSurrogatePairs() {
+        val actual = TextUtility.convertToComponent("\\U0001F50A \\uD83D\\uDD0A \\u00e9 \\u0041")
+        assertEquals("🔊 🔊 é A", PlainTextComponentSerializer.plainText().serialize(actual))
+    }
+
+    @Test
+    fun convertToComponent_preservesMalformedAndOutOfRangeEscapes() {
+        for (input in listOf("", "plain", "é 🔊", "\\u12", "\\uZZZZ", "\\U0000ZZZZ", "\\U00110000", "\\UFFFFFFFF")) {
+            assertEquals(input, PlainTextComponentSerializer.plainText().serialize(TextUtility.convertToComponent(input)))
+        }
+    }
+
+    @Test
+    fun convertToComponent_decodesBeforeLegacyFormatting() {
+        assertEquals(
+            TextUtility.convertToComponent("&aGreen &6Gold"),
+            TextUtility.convertToComponent("\\u00A7aGreen \\u00266Gold")
+        )
+    }
 
     @Test
     fun replaceFormatCodes_convertsLegacyAmpersandColors() {

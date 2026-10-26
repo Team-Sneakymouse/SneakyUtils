@@ -82,6 +82,22 @@ class AlteredBlockManager(plugin: JavaPlugin) {
         return change
     }
 
+    /**
+     * Undoes every tracked change (called on plugin disable so a reload does not leave blocks
+     * altered). Markers are removed with each restore; any marker that survives a crash is restored
+     * when its entities next load.
+     */
+    fun restoreAll() {
+        val changes = alteredBlocks.values.flatMap { it.changes }
+        for (change in changes.reversed()) {
+            try {
+                change.undo(false)
+            } catch (e: RuntimeException) {
+                logger.severe("Failed to restore altered block at ${change.block.location}: ${e.message}")
+            }
+        }
+    }
+
     fun isTracked(block: Block): Boolean = alteredBlocks.containsKey(block)
 
     fun getByInternalName(internalName: String): List<Change> {

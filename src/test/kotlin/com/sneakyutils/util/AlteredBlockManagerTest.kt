@@ -77,4 +77,17 @@ class AlteredBlockManagerTest {
 
         assertTrue(entity.isValid)
     }
+
+    @Test
+    fun restoreAllRevertsTrackedBlocks() {
+        val manager = SneakyUtils.getAlteredBlockManager()
+        val block = world.getBlockAt(5, 64, 5)
+        manager.apply("test-spell", block, Material.AIR, false)
+        assertEquals(Material.AIR, block.type)
+
+        manager.restoreAll()
+
+        assertEquals(Material.STONE, block.type)
+        assertFalse(manager.isTracked(block))
+    }
 }

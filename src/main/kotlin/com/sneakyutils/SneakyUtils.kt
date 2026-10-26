@@ -36,6 +36,7 @@ open class SneakyUtils : JavaPlugin() {
     }
 
     override fun onDisable() {
+        alteredBlockManager?.restoreAll()
         alteredBlockManager = null
         logger.info("SneakyUtils disabled.")
     }

@@ -57,3 +57,10 @@ Failing tests are not acceptable. A skipped test does not demonstrate the behavi
 ## Human docs
 
 - `README.md` — usage, dependency coordinates, publishing
+
+## Repo-specific rules
+
+- **Additive API only.** Every public function in `com.sneakyutils.*` is a published API that all Sneaky plugins compile against. Add overloads or new functions; don't rename, remove or change semantics. Grep `repos/*/src` for usages before touching an existing one.
+- **No domain code.** Only portable Bukkit/Paper/Adventure/Java helpers belong here: no MagicSpells spell types, no consumer singletons, no game-mode models. A helper needs a second real consumer (see team policy `sneakyutils.md`).
+- **Altered-block identity is frozen.** Don't rename the scoreboard tag `sneakyutils_altered_block` or the PDC keys `altered_block_data/state/world/x/y/z`; add new keys and migrate on load.
+- **Update the docs list.** When you add a util file, add a line to README "What's included" and the architecture block above so agents find it before writing a duplicate.

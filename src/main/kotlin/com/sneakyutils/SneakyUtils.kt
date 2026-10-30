@@ -4,10 +4,15 @@ import com.sneakyutils.util.AlteredBlockListener
 import com.sneakyutils.util.AlteredBlockManager
 import org.bukkit.plugin.java.JavaPlugin
 
+/**
+ * Public functions in com.sneakyutils.* are a published API every Sneaky plugin compiles against: add overloads,
+ * don't rename, remove or change semantics (grep repos/*/src for usages first).
+ */
 open class SneakyUtils : JavaPlugin() {
 
     companion object {
         const val IDENTIFIER = "sneakyutils"
+        // Frozen with the altered_block_* PDC keys (AlteredBlockManager): add new keys and migrate on load.
         const val ALTERED_BLOCK_TAG = "sneakyutils_altered_block"
 
         lateinit var instance: SneakyUtils

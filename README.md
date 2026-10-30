@@ -31,6 +31,51 @@ dependencies {
 
 Ensure `SneakyUtils` is installed and loads before plugins that call `SneakyUtils.getAlteredBlockManager()`.
 
+## Temporary block changes
+
+Use the shared manager on the **server thread**:
+
+```java
+var manager = SneakyUtils.getAlteredBlockManager();
+// 100 server ticks; automatic restoration uses false for physics as well.
+var change = manager.apply("my-plugin:effect", block, Material.AIR, false, 100L);
+// Optional early restoration cancels the scheduled undo:
+change.undo(false);
+```
+
+Existing untimed overloads remain unchanged. Optional timed overloads (Java and Kotlin):
+
+```text
+apply(String, Block, Material, boolean applyPhysics, long durationTicks): Change
+apply(String, Block, BlockData, boolean applyPhysics, long durationTicks): Change
+register(String, Block, BlockData fromData, BlockState fromState,
+         boolean applyPhysics, long durationTicks): Change
+add(Change, boolean applyPhysics, long durationTicks): void
+```
+
+- Durations must be **positive**; zero/negative values throw `IllegalArgumentException`
+  before world mutation or registration. Omit the duration to keep a change untimed.
+- Durations use synchronous Bukkit scheduler ticks (nominally 20 ticks/second),
+  not wall-clock time; server lag delays expiration.
+- `applyPhysics` controls both the initial `apply` write and automatic restoration.
+  For `register`/`add`, it controls restoration only: these APIs never perform the edit.
+  Capture original data/state **before** an external edit, then register afterwards.
+- `Change.undo(...)`, `undoAll(...)`, and plugin-disable `restoreAll()` cancel timers.
+  Explicit undo uses its own physics argument. Use the exact registered/returned
+  `Change` instance, not a structurally equal copy; register each instance only once
+  while active. Record components and existing method signatures are preserved.
+- Timers are in-memory, not persisted countdowns. Persistent marker recovery remains
+  unchanged: after a crash, orphan markers restore blocks when their entities load.
+- Overlapping edits retain existing snapshot semantics, **not** a compositing stack.
+  Undo restores that change's captured state (or the original when it is last).
+  An older change expiring first can overwrite a newer edit still tracked on that
+  block. Coordinate overlapping lifetimes/LIFO undo in the consumer when necessary.
+
+Tests cover scheduler deadlines, early/bulk cancellation, stale callbacks, equal
+records, physics flag forwarding, and untimed compatibility with MockBukkit.
+Live Paper checks still needed: actual neighbor physics, tile-state restoration,
+and crash/restart marker recovery; unit tests are not in-game verification.
+
 ## Plain character names
 
 ```java

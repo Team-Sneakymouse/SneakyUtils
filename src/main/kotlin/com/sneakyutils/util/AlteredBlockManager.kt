@@ -30,12 +30,22 @@ import org.bukkit.entity.Marker
 import org.bukkit.inventory.ItemStack
 import org.bukkit.persistence.PersistentDataType
 import org.bukkit.plugin.java.JavaPlugin
+import org.bukkit.scheduler.BukkitTask
+import java.util.IdentityHashMap
 import java.util.Base64
 import java.util.UUID
 import java.util.logging.Logger
 
-class AlteredBlockManager(plugin: JavaPlugin) {
+/**
+ * Shared reversible block changes. Call all APIs on the server thread.
+ * Timed overloads require positive server-tick durations (not wall-clock time);
+ * zero/negative values throw [IllegalArgumentException] before registration or mutation.
+ * Automatic undo uses the supplied physics flag; explicit undo may override it and cancels the timer.
+ * Register each Change instance only once while active, and undo that exact instance.
+ */
+class AlteredBlockManager(private val plugin: JavaPlugin) {
 
+    private val pendingUndos = IdentityHashMap<Change, BukkitTask>()
     private val alteredBlocks: MutableMap<Block, AlteredBlock> = HashMap()
     private val logger: Logger = plugin.logger
     private val blockDataKey = NamespacedKey(plugin, "altered_block_data")
@@ -52,6 +62,13 @@ class AlteredBlockManager(plugin: JavaPlugin) {
         if (isNew) {
             alteredBlock.marker = spawnMarker(change.block, change.fromData, change.fromState)
         }
+    }
+
+    /** Registers a supplied change and undoes it after [durationTicks] ticks with [applyPhysics]. */
+    fun add(change: Change, applyPhysics: Boolean, durationTicks: Long) {
+        require(durationTicks > 0) { "durationTicks must be positive" }
+        add(change)
+        scheduleUndo(change, applyPhysics, durationTicks)
     }
 
     /**
@@ -72,6 +89,30 @@ class AlteredBlockManager(plugin: JavaPlugin) {
     fun apply(internalName: String, block: Block, material: Material, applyPhysics: Boolean): Change =
         apply(internalName, block, material.createBlockData(), applyPhysics)
 
+    /** Applies a change and undoes it after [durationTicks] server ticks, using [applyPhysics]. */
+    fun apply(internalName: String, block: Block, material: Material, applyPhysics: Boolean, durationTicks: Long): Change =
+        apply(internalName, block, material.createBlockData(), applyPhysics, durationTicks)
+
+    /** Applies a change and undoes it after [durationTicks] server ticks, using [applyPhysics]. */
+    fun apply(internalName: String, block: Block, newData: BlockData, applyPhysics: Boolean, durationTicks: Long): Change {
+        require(durationTicks > 0) { "durationTicks must be positive" }
+        val change = apply(internalName, block, newData, applyPhysics)
+        scheduleUndo(change, applyPhysics, durationTicks)
+        return change
+    }
+
+    private fun scheduleUndo(change: Change, applyPhysics: Boolean, durationTicks: Long) {
+        pendingUndos.remove(change)?.cancel()
+        lateinit var task: BukkitTask
+        task = Bukkit.getScheduler().runTaskLater(plugin, Runnable {
+            if (pendingUndos[change] === task) {
+                pendingUndos.remove(change)
+                change.undo(applyPhysics)
+            }
+        }, durationTicks)
+        pendingUndos[change] = task
+    }
+
     /**
      * Registers a reversible [Change] for a block that has already been modified
      * (e.g. by WorldEdit). Does not write to the world.
@@ -79,6 +120,17 @@ class AlteredBlockManager(plugin: JavaPlugin) {
     fun register(internalName: String, block: Block, fromData: BlockData, fromState: BlockState): Change {
         val change = Change(internalName, block, fromData, fromState)
         add(change)
+        return change
+    }
+
+    /** Registers an external edit and schedules restoration with [applyPhysics] after [durationTicks] ticks. */
+    fun register(
+        internalName: String, block: Block, fromData: BlockData, fromState: BlockState,
+        applyPhysics: Boolean, durationTicks: Long,
+    ): Change {
+        require(durationTicks > 0) { "durationTicks must be positive" }
+        val change = register(internalName, block, fromData, fromState)
+        scheduleUndo(change, applyPhysics, durationTicks)
         return change
     }
 
@@ -239,15 +291,17 @@ class AlteredBlockManager(plugin: JavaPlugin) {
     ) {
         fun undo(applyPhysics: Boolean) {
             val manager = SneakyUtils.getAlteredBlockManager()
+            manager.pendingUndos.remove(this)?.cancel()
             val alteredBlock = manager.alteredBlocks[block]
-            if (alteredBlock != null && alteredBlock.changes.contains(this)) {
+            val index = alteredBlock?.changes?.indexOfFirst { it === this } ?: -1
+            if (alteredBlock != null && index >= 0) {
                 if (alteredBlock.changes.size == 1) {
                     restoreBlockState(alteredBlock.originalBlockData, alteredBlock.originalBlockState, applyPhysics)
                     manager.removeMarker(alteredBlock)
                     manager.alteredBlocks.remove(block)
                 } else {
                     restoreBlockState(fromData, fromState, applyPhysics)
-                    alteredBlock.changes.remove(this)
+                    alteredBlock.changes.removeAt(index)
                 }
             }
         }

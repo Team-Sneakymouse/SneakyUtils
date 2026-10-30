@@ -31,6 +31,46 @@ dependencies {
 
 Ensure `SneakyUtils` is installed and loads before plugins that call `SneakyUtils.getAlteredBlockManager()`.
 
+## Plain character names
+
+```java
+String name = PlayerNameUtils.getCharacterName(player);
+```
+
+Call `com.sneakyutils.util.PlayerNameUtils.getCharacterName(Player)` on the **server thread**.
+It reads SneakyCharacterManager's raw `Character.get(player).getName()` and
+locally strips angle-bracket tags (`<[^>]*>`, matching SCM), standard legacy `&`/`§` formatting codes (case insensitive),
+compact hex `&#RRGGBB` / `§#RRGGBB`, and expanded hex `&x&R&R&G&G&B&B` /
+`§x§R§R§G§G§B§B`. If the manager is absent/disabled, its API cannot be invoked,
+or the character/name is missing or blank **after sanitization**, it returns
+`player.getName()`. Each call reads current state; nonformat literal text and
+spaces are preserved, including literal `&x` unless it starts a complete expanded
+hex code. Angle-bracket tags are removed even when not recognized MiniMessage tags;
+names are not otherwise parsed as MiniMessage or placeholders.
+
+SneakyCharacterManager and PlaceholderAPI are **not required** by SneakyUtils.
+The optional bridge resolves the API through the enabled manager's classloader,
+not SneakyUtils' classpath. Do not add a SneakyUtils → SCM load-before/dependency
+edge: SCM already requires SneakyUtils. Consumers still declare their normal
+runtime dependency on SneakyUtils. Calls before SCM is enabled deliberately fall
+back; callers needing a character at startup must wait for SCM to be ready.
+
+API source verified in [SneakyCharacterManager-Paper at `fbb7aa3f3e8d65c2ef6c95b0253f835daea383ec`](https://github.com/Team-Sneakymouse/SneakyCharacterManager-Paper/tree/fbb7aa3f3e8d65c2ef6c95b0253f835daea383ec):
+`paper/.../handlers/character/Character.java` supplies public static `get(Player)`
+and instance `getName()` (the raw stored name) and `getNameUnformatted()`;
+`handlers/Placeholders.java` uses `getNameUnformatted()`
+for `character_name_noformat`. This uses the character name, not the display name
+(no prefix, title, or gender suffix). SCM's current `util/ChatUtility.stripFormatting`
+removes angle-bracket tags and legacy `&` codes, but not `§` codes or all hex
+formats. Calling it first destroys expanded ampersand hex (`&x&F&F&A&A&0&0Momo`
+becomes `&xMomo`), so this helper sanitizes the raw name locally, matching SCM
+angle-tag removal while handling the intact legacy/hex formats listed above.
+
+Tests exercise the bridge with a contract fixture, not the real SCM plugin.
+Remaining server checks: Paper plugin-classloader isolation with both real JARs,
+SCM absent/disabled, character selection/rename, and representative formatting.
+The active-character map is a plain `HashMap`, hence the server-thread contract.
+
 ## Versioning
 
 Builds **require a git checkout** with at least one commit. The version is:

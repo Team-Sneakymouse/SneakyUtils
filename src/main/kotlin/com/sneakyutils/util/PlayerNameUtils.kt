@@ -5,13 +5,17 @@ import org.bukkit.entity.Player
 
 object PlayerNameUtils {
 
+    private val nameFormatting = Regex(
+        "<[^>]*>|[&§][xX](?:[&§][0-9a-fA-F]){6}|[&§]#[0-9a-fA-F]{6}|[&§][0-9a-fk-orA-FK-OR]"
+    )
+
     /**
-     * Returns SCM's unformatted character name, or [Player.getName] when SCM is disabled,
+     * Returns SCM's raw character name with angle tags and legacy/hex codes removed, or [Player.getName] when SCM is disabled,
      * absent, incompatible, or has no nonblank name for this player.
      *
      * Call on the server thread: SCM's active-character map is not thread-safe.
      * Uses the enabled manager's own classloader; no SCM/PAPI dependency or reverse
-     * load-order declaration is needed. Names are not cached, trimmed, or reparsed.
+     * load-order declaration is needed. Names are not cached, trimmed, or parsed as MiniMessage.
      */
     @JvmStatic
     fun getCharacterName(player: Player): String {
@@ -23,8 +27,8 @@ object PlayerNameUtils {
             )
             val character = characterType.getMethod("get", Player::class.java).invoke(null, player)
                 ?: return player.name
-            val name = characterType.getMethod("getNameUnformatted").invoke(character) as? String
-            name?.takeUnless { it.isBlank() } ?: player.name
+            val name = characterType.getMethod("getName").invoke(character) as? String
+            name?.replace(nameFormatting, "")?.takeUnless { it.isBlank() } ?: player.name
         } catch (_: ReflectiveOperationException) {
             player.name
         } catch (_: LinkageError) {

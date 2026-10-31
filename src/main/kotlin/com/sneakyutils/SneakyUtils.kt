@@ -6,7 +6,7 @@ import org.bukkit.plugin.java.JavaPlugin
 
 /**
  * Public functions in com.sneakyutils.* are a published API every Sneaky plugin compiles against: add overloads,
- * don't rename, remove or change semantics (grep repos/*/src for usages first).
+ * don't rename, remove or change semantics (search repository source trees for usages first).
  */
 open class SneakyUtils : JavaPlugin() {
 

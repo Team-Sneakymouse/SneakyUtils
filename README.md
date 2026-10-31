@@ -9,6 +9,7 @@ This is a live Paper plugin (not a compile-only library). Install the JAR on the
 - `TextUtility` — Unicode escape decoding (`\uXXXX` / `\UXXXXXXXX`), legacy `&`/`§` → MiniMessage → Adventure `Component`, plus balanced line wrapping
 - `AlteredBlockManager` — reversible temporary block changes with persistent Marker fallback (scoreboard tag `sneakyutils_altered_block`, PDC keys under `sneakyutils:`)
 - MagicsSpells-ported static helpers under `com.sneakyutils.util`: location/XP/color/params, `BlockUtils`, `EntityPdc` (injectable namespace), attribute/particle/sound/potion name resolution, geometry (`BoundingBox` / `bounds`), `AtomicFiles`, and small Bukkit/stdlib helpers
+- `PlayerUtil` — SCM noformat character names via optional PAPI, CMI-aware target eligibility, and Bukkit account-name lookups
 - Cross-plugin ports: `InventoryUtility` (Paper YAML + legacy Base64), `PermissionUtility`, `PoseFacing` / `Direction`, `ItemMetaText`
 
 ## Consumer usage
@@ -76,45 +77,65 @@ records, physics flag forwarding, and untimed compatibility with MockBukkit.
 Live Paper checks still needed: actual neighbor physics, tile-state restoration,
 and crash/restart marker recovery; unit tests are not in-game verification.
 
-## Plain character names
+## Player helpers
+
+`com.sneakyutils.util.PlayerUtil` exposes Java-static and Kotlin-callable helpers:
 
 ```java
-String name = PlayerNameUtils.getCharacterName(player);
+String name = PlayerUtil.getCharacterName(player);
+boolean target = PlayerUtil.canTarget(player);       // creative excluded
+boolean creativeTarget = PlayerUtil.canTarget(player, true);
+Player exact = PlayerUtil.getPlayerExact("MinecraftName");
+Player partial = PlayerUtil.getPlayer("Minecraft");
 ```
 
-Call `com.sneakyutils.util.PlayerNameUtils.getCharacterName(Player)` on the **server thread**.
-It reads SneakyCharacterManager's raw `Character.get(player).getName()` and
-locally strips angle-bracket tags (`<[^>]*>`, matching SCM), standard legacy `&`/`§` formatting codes (case insensitive),
-compact hex `&#RRGGBB` / `§#RRGGBB`, and expanded hex `&x&R&R&G&G&B&B` /
-`§x§R§R§G§G§B§B`. If the manager is absent/disabled, its API cannot be invoked,
-or the character/name is missing or blank **after sanitization**, it returns
-`player.getName()`. Each call reads current state; nonformat literal text and
-spaces are preserved, including literal `&x` unless it starts a complete expanded
-hex code. Angle-bracket tags are removed even when not recognized MiniMessage tags;
-names are not otherwise parsed as MiniMessage or placeholders.
+Call on the **server thread**. Character names are read through PlaceholderAPI's
+`%sneakycharacters_character_name_noformat%`, not the display name (no added title,
+prefix or gender suffix). The result is preserved exactly: no local stripping,
+trimming, formatting repairs or recursive placeholder expansion. Insert it as
+literal text rather than parsing it as MiniMessage. If SCM or PAPI is absent or
+disabled, the expansion is missing, or the result is blank/unresolved, the helper
+returns `player.getName()`. Calls observe current names and plugin state.
 
-SneakyCharacterManager and PlaceholderAPI are **not required** by SneakyUtils.
-The optional bridge resolves the API through the enabled manager's classloader,
-not SneakyUtils' classpath. Do not add a SneakyUtils → SCM load-before/dependency
-edge: SCM already requires SneakyUtils. Consumers still declare their normal
-runtime dependency on SneakyUtils. Calls before SCM is enabled deliberately fall
-back; callers needing a character at startup must wait for SCM to be ready.
+PAPI 2.11.5 is compile-only (matching SCM's declared API version), not bundled.
+The Paper descriptor declares an **optional joined classpath** dependency on
+PlaceholderAPI. SCM is not a dependency: it already depends on SneakyUtils.
+Calls before SCM is enabled deliberately fall back.
 
-API source verified in [SneakyCharacterManager-Paper at `fbb7aa3f3e8d65c2ef6c95b0253f835daea383ec`](https://github.com/Team-Sneakymouse/SneakyCharacterManager-Paper/tree/fbb7aa3f3e8d65c2ef6c95b0253f835daea383ec):
-`paper/.../handlers/character/Character.java` supplies public static `get(Player)`
-and instance `getName()` (the raw stored name) and `getNameUnformatted()`;
-`handlers/Placeholders.java` uses `getNameUnformatted()`
-for `character_name_noformat`. This uses the character name, not the display name
-(no prefix, title, or gender suffix). SCM's current `util/ChatUtility.stripFormatting`
-removes angle-bracket tags and legacy `&` codes, but not `§` codes or all hex
-formats. Calling it first destroys expanded ampersand hex (`&x&F&F&A&A&0&0Momo`
-becomes `&xMomo`), so this helper sanitizes the raw name locally, matching SCM
-angle-tag removal while handling the intact legacy/hex formats listed above.
+`canTarget(Player)` defaults `allowCreative` to false; both overloads are Java
+static. Survival and Adventure are eligible, Creative only with explicit opt-in,
+and Spectator never. CMI vanish detection follows SCM's nametag implementation:
+`%cmi_user_vanished_symbol%` excludes the player only when **resolved and nonempty**.
+Whitespace and `false` count as nonempty symbols; this is not a boolean placeholder.
+Absent/disabled PAPI, missing expansion and unresolved/null expansion responses
+are treated as not known to be vanished (fail-open, matching SCM nametags).
+The helper adds no dead/offline, permissions or viewer-visibility checks.
 
-Tests exercise the bridge with a contract fixture, not the real SCM plugin.
-Remaining server checks: Paper plugin-classloader isolation with both real JARs,
-SCM absent/disabled, character selection/rename, and representative formatting.
-The active-character map is a plain `HashMap`, hence the server-thread contract.
+Source contract verified in [SCM at `b80befa89e397d60ee0a3c05cf1af5bdd91301bc`](https://github.com/Team-Sneakymouse/SneakyCharacterManager-Paper/tree/b80befa89e397d60ee0a3c05cf1af5bdd91301bc):
+`SneakyCharacterManager.IDENTIFIER` is `sneakycharacters`; `handlers/Placeholders.java`
+registers `character_name_noformat` via `getNameUnformatted()`;
+`handlers/nametags/NametagManager.java` checks the resolved nonempty CMI symbol.
+`commands/CommandSkin.java` lacks the nametag unresolved-token guard; this helper
+uses the nametag contract, so unavailable CMI does not hide every player.
+
+### Migration and verification
+
+`PlayerNameUtils` has been removed as requested, not retained as a compatibility
+class. Change imports and all three existing method calls to `PlayerUtil` and
+recompile consumers; this is a **source and binary breaking change**. Account-name
+exact/partial lookup semantics remain Bukkit's and do not resolve character names.
+Local source searches of SneakyKnives, SneakyHaunted, SneakyLeveling, SCM and
+MagicSpells-pdc found no shared `PlayerNameUtils` callers; MagicSpells has its own
+same-named utility, which is not this API. Other checkouts/deployed JARs and shared
+team policy may still reference the removed class and require separate migration.
+No other repositories were changed for migration.
+
+Tests exercise real PAPI expansion registration, lookup and parsing with test
+expansions; only the PAPI plugin lifecycle singleton/config is mocked. They do
+not execute the real SCM/CMI plugins. Live Paper checks still needed: optional
+PAPI absence and joined plugin classloading, SCM selection/rename and disable,
+CMI vanish/unvanish in each game mode, and actual provider output. Provider
+formatting quirks are intentionally preserved, not repaired in SneakyUtils.
 
 ## Versioning
 

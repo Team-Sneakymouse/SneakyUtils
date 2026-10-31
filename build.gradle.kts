@@ -26,6 +26,7 @@ version =
 
 repositories {
     mavenCentral()
+    maven("https://repo.extendedclip.com/content/repositories/placeholderapi/")
     maven("https://repo.papermc.io/repository/maven-public/")
 }
 
@@ -35,12 +36,15 @@ val mockBukkitVersion = "4.117.0"
 dependencies {
     compileOnly("io.papermc.paper:paper-api:$paperApi")
     compileOnly("com.google.code.gson:gson:2.11.0")
+    compileOnly("me.clip:placeholderapi:2.11.5")
     implementation("org.jetbrains.kotlin:kotlin-stdlib:2.3.21")
 
     testImplementation("io.papermc.paper:paper-api:$paperApi")
     testImplementation("com.google.code.gson:gson:2.11.0")
     testImplementation("org.junit.jupiter:junit-jupiter:5.11.4")
     testImplementation("org.mockbukkit.mockbukkit:mockbukkit-v26.2:$mockBukkitVersion")
+    testImplementation("me.clip:placeholderapi:2.11.5")
+    testImplementation("org.mockito:mockito-core:5.21.0")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
 

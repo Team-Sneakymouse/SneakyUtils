@@ -11,6 +11,7 @@ This is a live Paper plugin (not a compile-only library). Install the JAR on the
 - MagicsSpells-ported static helpers under `com.sneakyutils.util`: location/XP/color/params, `BlockUtils`, `EntityPdc` (injectable namespace), attribute/particle/sound/potion name resolution, geometry (`BoundingBox` / `bounds`), `AtomicFiles`, and small Bukkit/stdlib helpers
 - `com.sneakyutils.util.items.ItemBehaviors` — soulbinding and expiration, with utility-owned enforcement, scheduling and `ItemExpireEvent`
 - `PlayerUtil` — SCM noformat character names via optional PAPI, CMI-aware target eligibility, and Bukkit account-name lookups
+- `com.sneakyutils.watch.WatchEngine` — looking through a camera (from SneakyCCTV): eye held at the lens within a look cone, a mannequin body left behind, adventure/spectator watching with `WatchRestrictions`, left/right switching, crash-safe sessions file; one subclass per kind of camera (SneakyCCTV, SneakyHaunted's ghost cams), a player in one at a time. `Directions` holds the yaw/pitch/cone maths
 - Cross-plugin ports: `InventoryUtility` (Paper YAML + legacy Base64), `PermissionUtility`, `PoseFacing` / `Direction`, `ItemMetaText`
 
 ## Consumer usage

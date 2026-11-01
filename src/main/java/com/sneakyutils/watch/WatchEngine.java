@@ -117,7 +117,7 @@ public abstract class WatchEngine<F> implements Listener {
     protected abstract String feedId(F f);
 
     /** Where the watcher's eye goes, or null if it can't be watched now. */
-    protected abstract Location eye(F f);
+    protected abstract Location lens(F f);
 
     /** Straight out from what the camera's on (a unit vector): the middle of the cone they can look round. */
     protected abstract Vector normal(F f);
@@ -250,7 +250,7 @@ public abstract class WatchEngine<F> implements Listener {
                 continue;
             }
             F f = feed(s.camera);
-            Location eye = f == null ? null : eye(f);
+            Location eye = f == null ? null : lens(f);
             if (eye == null) {
                 leave(p, msg("signal-lost", "&cSignal lost."), true);
                 continue;
@@ -286,7 +286,7 @@ public abstract class WatchEngine<F> implements Listener {
 
     /** Starts watching f, or switches to it if they already watch through this engine. */
     public void watch(Player p, F f) {
-        Location eye = eye(f);
+        Location eye = lens(f);
         if (eye == null) {
             p.sendActionBar(msg("signal-lost", "&cSignal lost."));
             return;
@@ -666,7 +666,7 @@ public abstract class WatchEngine<F> implements Listener {
                 return;
             }
             F f = feed(s.camera);
-            Location eye = f == null ? null : eye(f);
+            Location eye = f == null ? null : lens(f);
             if (eye == null) return;
             Location to = e.getTo();
             if (to.getWorld() != eye.getWorld() || Math.abs(to.getX() - e.getFrom().getX()) + Math.abs(to.getY() - e.getFrom().getY())
@@ -725,7 +725,7 @@ public abstract class WatchEngine<F> implements Listener {
         if (s.lostUntil >= 0 && s.lostAt != null && e.getTo().getWorld() == s.lostAt.getWorld()
             && e.getTo().distanceSquared(s.lostAt) < 0.01) return;      // held while the signal's lost
         F f = feed(s.camera);
-        Location eye = f == null ? null : eye(f);
+        Location eye = f == null ? null : lens(f);
         if (eye != null && e.getTo().getWorld() == eye.getWorld()
             && e.getTo().distanceSquared(stand(e.getPlayer(), eye, 0, 0)) < 0.01) return;
         s.ending = true;

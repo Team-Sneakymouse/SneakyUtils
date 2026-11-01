@@ -36,7 +36,7 @@ class WatchEngineTest {
         var left = 0
         override fun feed(id: String) = cams[id]
         override fun feedId(f: Cam) = f.id
-        override fun eye(f: Cam): Location = f.eye.clone()
+        override fun lens(f: Cam): Location = f.eye.clone()
         override fun normal(f: Cam) = Vector(0, 0, 1)
         override fun limit(f: Cam) = 90.0
         override fun yaw(f: Cam) = 0f

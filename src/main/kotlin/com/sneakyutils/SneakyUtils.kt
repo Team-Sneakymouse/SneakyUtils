@@ -35,12 +35,22 @@ open class SneakyUtils : JavaPlugin() {
     }
 
     override fun onEnable() {
+        val expiration = com.sneakyutils.util.items.ItemExpirationListener()
+        server.pluginManager.registerEvents(expiration, this)
+        server.pluginManager.registerEvents(com.sneakyutils.util.items.CharacterExpirationHook(this, expiration), this)
+        // Dependents register their listeners during enable before the first server tick.
+        val initialPlayers = server.onlinePlayers.toList()
+        if (initialPlayers.isNotEmpty()) server.scheduler.runTask(this, Runnable {
+            if (isEnabled) initialPlayers.filter { it.isOnline }.forEach { expiration.joinOrLoadCharacter(it) }
+        })
+        server.pluginManager.registerEvents(com.sneakyutils.util.items.ItemSoulboundListener(), this)
         alteredBlockManager = AlteredBlockManager(this)
         server.pluginManager.registerEvents(AlteredBlockListener(), this)
         logger.info("SneakyUtils enabled.")
     }
 
     override fun onDisable() {
+        com.sneakyutils.util.items.ItemExpirationScheduler.shutdown()
         alteredBlockManager?.restoreAll()
         alteredBlockManager = null
         logger.info("SneakyUtils disabled.")

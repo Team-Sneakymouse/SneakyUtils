@@ -9,6 +9,7 @@ This is a live Paper plugin (not a compile-only library). Install the JAR on the
 - `TextUtility` — Unicode escape decoding (`\uXXXX` / `\UXXXXXXXX`), legacy `&`/`§` → MiniMessage → Adventure `Component`, plus balanced line wrapping
 - `AlteredBlockManager` — reversible temporary block changes with persistent Marker fallback (scoreboard tag `sneakyutils_altered_block`, PDC keys under `sneakyutils:`)
 - MagicsSpells-ported static helpers under `com.sneakyutils.util`: location/XP/color/params, `BlockUtils`, `EntityPdc` (injectable namespace), attribute/particle/sound/potion name resolution, geometry (`BoundingBox` / `bounds`), `AtomicFiles`, and small Bukkit/stdlib helpers
+- `com.sneakyutils.util.items.ItemBehaviors` — soulbinding and expiration, with utility-owned enforcement, scheduling and `ItemExpireEvent`
 - `PlayerUtil` — SCM noformat character names via optional PAPI, CMI-aware target eligibility, and Bukkit account-name lookups
 - Cross-plugin ports: `InventoryUtility` (Paper YAML + legacy Base64), `PermissionUtility`, `PoseFacing` / `Direction`, `ItemMetaText`
 
@@ -31,6 +32,59 @@ dependencies {
 ```
 
 Ensure `SneakyUtils` is installed and loads before plugins that call `SneakyUtils.getAlteredBlockManager()`.
+
+## Item behaviors
+
+Call the Java-static API on the **server thread**, with SneakyUtils installed and
+listed as a required server dependency. No MagicSpells dependency is needed:
+
+```java
+ItemBehaviors.applySoulbound(item, player); // or UUID
+ItemBehaviors.applyExpiration(item, 60_000.0); // duration in milliseconds
+ItemExpirationScheduler.scheduleFromItem(player, item); // after giving the item
+```
+
+The default application methods preserve an existing correctly typed value.
+`applySoulboundOverlay` and `applyExpirationOverlay` deliberately replace it.
+Persistence is **unchanged**, with no migration, namespace rewrite or timer reset:
+`magicspells:soulbound_owner` is a STRING UUID and `magicspells:expires_at` a LONG
+Unix epoch millisecond deadline. The historical namespace is a storage contract,
+not a runtime dependency. MagicSpells remains responsible for its item definitions
+and conjure overlays; it delegates the behaviors here.
+
+SneakyUtils registers soulbound/expiration listeners and owns all expiry tasks.
+Its initial online-player scan runs next tick, after dependent plugins register
+listeners; disabled providers and players who have left are ignored.
+Soulbound restrictions retain the legacy behavior: foreign-owner inventory entries
+are removed on join/open; pickup, use, clicks, drag, swaps and hotbar selection are
+blocked. Creative bypass requires `sneakyutils.nosoulbound` **and** Creative mode;
+the old `magicspells.nosoulbound` node no longer grants this bypass. Permissions
+should be migrated separately from item data.
+
+Inventory expiration emits synchronous, non-cancellable
+`com.sneakyutils.events.ItemExpireEvent` with the player and original stack before
+removal. Ground-item cleanup emits no inventory-expiration event. MagicSpells'
+`expireitem` passive consumes this event directly; there is no legacy event bridge.
+Future deadlines are deduplicated by (player UUID, deadline); inventory and ender
+chest entries are scanned at the deadline, and pending state is cleared on disable.
+Ground items retain legacy event-driven expiry checks, not independent timers.
+
+Optional SCM integration resolves its public
+`net.sneakycharactermanager.paper.handlers.character.LoadCharacterEvent` and
+`getPlayer()` using SCM's own classloader. There is no reverse dependency or joined
+SCM classpath. Already enabled and later enabled SCM instances are supported;
+uncancelled character loads scan inventory/armor/ender chest the next tick, after
+SCM restoration. Incompatible SCM event APIs produce a warning and leave ordinary
+join/inventory expiration working. SCM disable unregisters its hook.
+
+Verification: MockBukkit tests run without MagicSpells, using literal legacy keys,
+real listener dispatch, scheduler ticks, utility events and a test-only SCM public
+event fixture. Live Paper checks remain **pending**: actual SCM plugin classloader
+and character restoration, real inventory interactions (both hands/armor/chests),
+permission configuration and the MagicSpells passive trigger. No server was
+provisioned or deployed. Roll out matching provider and consumer builds together;
+rolling back only the consumer while leaving the new provider active would restore
+duplicate listeners. Item data itself needs no rollback conversion.
 
 ## Temporary block changes
 

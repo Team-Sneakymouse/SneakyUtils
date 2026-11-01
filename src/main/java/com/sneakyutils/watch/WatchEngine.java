@@ -67,7 +67,8 @@ import static com.sneakyutils.util.Directions.yawOf;
  * <p>One engine per kind of camera. A plugin subclasses this with its feed type F, says how to find a feed and where
  * its lens is, and adds what's its own through the hooks ({@link #entered}, {@link #ticked}, {@link #leaving},
  * {@link #left}). It calls {@link #register()} on enable, {@link #tickSessions()} and {@link #tickZzz()} each tick
- * (while anyone watches), and {@link #shutdown()} on disable. A player watches through one engine at a time.
+ * (while anyone watches), {@link #clearLeftovers()} a tick after enable, and {@link #shutdown()} on disable.
+ * A player watches through one engine at a time.
  *
  * <p>Settings (from {@link #settings()}): {@code watch-mode}, {@code body-name}, {@code sleeping-body.*},
  * {@code forward-damage}, {@code hide-watcher-gear}, {@code empty-hand}, {@code switch-keys}.
@@ -194,6 +195,17 @@ public abstract class WatchEngine<F> implements Listener {
         Bukkit.getPluginManager().registerEvents(this, plugin);
         Bukkit.getPluginManager().registerEvents(restrictions, plugin);
         ENGINES.add(this);
+    }
+
+    /**
+     * On enable (a tick after, once the worlds are in): bodies and their "z Z z" left over from a crash (they aren't
+     * saved, but just in case), and anyone online still marked as watching put back.
+     */
+    public void clearLeftovers() {
+        for (World w : Bukkit.getWorlds())
+            for (Entity e : w.getEntities())
+                if (!(e instanceof Player) && isBodyPart(e)) e.remove();
+        for (Player p : Bukkit.getOnlinePlayers()) restoreSaved(p);
     }
 
     /** Everyone watching comes back; the listeners go. */

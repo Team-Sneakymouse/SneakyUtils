@@ -34,6 +34,19 @@ object PlayerUtil {
         return symbol.isEmpty() || symbol == placeholder
     }
 
+    /**
+     * True only when dispatch duty and SCM's paladin tag both resolve to true.
+     * Call on the server thread; unavailable PAPI/expansions return false.
+     */
+    @JvmStatic
+    fun onDuty(player: Player): Boolean {
+        if (!Bukkit.getPluginManager().isPluginEnabled("PlaceholderAPI")) return false
+        return me.clip.placeholderapi.PlaceholderAPI.setPlaceholders(player, "%sneakydispatch_on_duty%")
+            .equals("true", ignoreCase = true) &&
+            me.clip.placeholderapi.PlaceholderAPI.setPlaceholders(player, "%sneakycharacters_character_hastag_paladin%")
+                .equals("true", ignoreCase = true)
+    }
+
     @JvmStatic
     fun getPlayerExact(playerName: String): Player? = Bukkit.getPlayerExact(playerName)
 

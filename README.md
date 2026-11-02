@@ -10,7 +10,7 @@ This is a live Paper plugin (not a compile-only library). Install the JAR on the
 - `AlteredBlockManager` — reversible temporary block changes with persistent Marker fallback (scoreboard tag `sneakyutils_altered_block`, PDC keys under `sneakyutils:`)
 - MagicsSpells-ported static helpers under `com.sneakyutils.util`: location/XP/color/params, `BlockUtils`, `EntityPdc` (injectable namespace), attribute/particle/sound/potion name resolution, geometry (`BoundingBox` / `bounds`), `AtomicFiles`, and small Bukkit/stdlib helpers
 - `com.sneakyutils.util.items.ItemBehaviors` — soulbinding and expiration, with utility-owned enforcement, scheduling and `ItemExpireEvent`
-- `PlayerUtil` — SCM noformat character names via optional PAPI, CMI-aware target eligibility, and Bukkit account-name lookups
+- `PlayerUtil` — SCM noformat character names via optional PAPI, CMI-aware target eligibility, paladin on-duty checks, and Bukkit account-name lookups
 - `com.sneakyutils.watch.WatchEngine` — looking through a camera (from SneakyCCTV): eye held at the lens within a look cone, a mannequin body left behind, adventure/spectator watching with `WatchRestrictions`, left/right switching, crash-safe sessions file; one subclass per kind of camera (SneakyCCTV, SneakyHaunted's ghost cams), a player in one at a time. `Directions` holds the yaw/pitch/cone maths
 - Cross-plugin ports: `InventoryUtility` (Paper YAML + legacy Base64), `PermissionUtility`, `PoseFacing` / `Direction`, `ItemMetaText`
 
@@ -140,6 +140,7 @@ and crash/restart marker recovery; unit tests are not in-game verification.
 String name = PlayerUtil.getCharacterName(player);
 boolean target = PlayerUtil.canTarget(player);       // creative excluded
 boolean creativeTarget = PlayerUtil.canTarget(player, true);
+boolean onDuty = PlayerUtil.onDuty(player);          // dispatch duty AND paladin tag
 Player exact = PlayerUtil.getPlayerExact("MinecraftName");
 Player partial = PlayerUtil.getPlayer("Minecraft");
 ```
@@ -172,6 +173,20 @@ registers `character_name_noformat` via `getNameUnformatted()`;
 `handlers/nametags/NametagManager.java` checks the resolved nonempty CMI symbol.
 `commands/CommandSkin.java` lacks the nametag unresolved-token guard; this helper
 uses the nametag contract, so unavailable CMI does not hide every player.
+
+`onDuty(Player)` returns true only when **both** `%sneakydispatch_on_duty%` and
+`%sneakycharacters_character_hastag_paladin%` resolve to `true` (case-insensitive,
+without trimming). It reads current values each call through PAPI; missing/disabled
+PAPI, missing expansions, null/unresolved responses and any other output return
+false. There is no hard dependency or reverse classpath link to SCM or Dispatch.
+Call on the **server thread**. Provider exceptions are not swallowed. Tests cover
+real PAPI parsing/dispatch with test expansions, not the running providers; live
+Paper verification still needs duty toggles, paladin tag/character changes and
+optional PAPI absence/classloading checks.
+
+Source contract verified in SneakyDispatch's `Placeholders.kt` (`on_duty`, with
+identifier `sneakydispatch`) and SCM's `handlers/Placeholders.java`
+(`character_hastag_`, with identifier `sneakycharacters`).
 
 ### Migration and verification
 

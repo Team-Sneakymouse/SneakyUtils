@@ -11,6 +11,7 @@ This is a live Paper plugin (not a compile-only library). Install the JAR on the
 - MagicsSpells-ported static helpers under `com.sneakyutils.util`: location/XP/color/params, `BlockUtils`, `EntityPdc` (injectable namespace), attribute/particle/sound/potion name resolution, geometry (`BoundingBox` / `bounds`), `AtomicFiles`, and small Bukkit/stdlib helpers
 - `com.sneakyutils.util.items.ItemBehaviors` — soulbinding and expiration, with utility-owned enforcement, scheduling and `ItemExpireEvent`
 - `PlayerUtil` — SCM noformat character names via optional PAPI, CMI-aware target eligibility, paladin on-duty checks, and Bukkit account-name lookups
+- `ServerUtil` — server display name and kebab-case server id from the `P_SERVER_NAME` environment variable
 - `com.sneakyutils.watch.WatchEngine` — looking through a camera (from SneakyCCTV): eye held at the lens within a look cone, a mannequin body left behind, adventure/spectator watching with `WatchRestrictions`, left/right switching, crash-safe sessions file; one subclass per kind of camera (SneakyCCTV, SneakyHaunted's ghost cams), a player in one at a time. `Directions` holds the yaw/pitch/cone maths
 - Cross-plugin ports: `InventoryUtility` (Paper YAML + legacy Base64), `PermissionUtility`, `PoseFacing` / `Direction`, `ItemMetaText`
 
@@ -206,6 +207,33 @@ not execute the real SCM/CMI plugins. Live Paper checks still needed: optional
 PAPI absence and joined plugin classloading, SCM selection/rename and disable,
 CMI vanish/unvanish in each game mode, and actual provider output. Provider
 formatting quirks are intentionally preserved, not repaired in SneakyUtils.
+
+## Server identity
+
+`com.sneakyutils.util.ServerUtil` exposes Java-static (Kotlin-callable) getters
+that read the `P_SERVER_NAME` environment variable on each call:
+
+```java
+@Nullable String name = ServerUtil.getServerName(); // "Dev Main"
+@Nullable String id = ServerUtil.getServerId();     // "dev-main"
+```
+
+- `getServerName()` returns the supplied value **exactly** (no trimming or case
+  changes), for display. It returns `null` when the variable is missing, empty or
+  whitespace-only.
+- `getServerId()` derives a lowercase kebab-case id from that name: lowercased with
+  `Locale.ROOT` (independent of the JVM default locale), every run of characters
+  other than Unicode letters/digits (whitespace, punctuation, `_`, symbols) becomes
+  one `-`, and leading/trailing `-` are removed. Examples: `Dev Main` → `dev-main`,
+  `Dev_Main` → `dev-main`, `LoM (EU) 1` → `lom-eu-1`. Non-ASCII letters/digits are
+  kept, not transliterated.
+- `getServerId()` returns `null` whenever `getServerName()` does, and also when the
+  name has no letters or digits (e.g. `---`).
+
+Both values are nullable: handle `null` explicitly rather than substituting a
+default identity. There is no config file or command; the environment is set by
+the server host. Tests cover the derivation and read a real test-JVM
+environment; live servers' `P_SERVER_NAME` values are not verified here.
 
 ## Versioning
 

@@ -83,6 +83,8 @@ tasks {
 
     test {
         useJUnitPlatform()
+        // Real-environment fixture for ServerUtilEnvironmentTest.
+        environment("P_SERVER_NAME", "Dev Main")
     }
 
     val publishPreflight by registering(Exec::class) {

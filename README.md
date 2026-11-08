@@ -83,9 +83,15 @@ add(Change, boolean applyPhysics, long durationTicks): void
 `getBlocksInBox(world, minX, minY, minZ, maxX, maxY, maxZ, internalNames)` returns the
 tracked blocks inside an inclusive block-coordinate box that have a change under one of
 the names, each once, in no particular order. It only looks at the chunks the box
-overlaps, so its cost does not grow with every tracked block on the server, unlike
-`getByInternalName`. For a sphere or cylinder, query a box that encloses it and apply
-the exact shape check to the result.
+overlaps, so its cost does not grow with every tracked block on the server. For a
+sphere or cylinder, query a box that encloses it and apply the exact shape check to
+the result.
+
+`getByInternalName(name)` and `undoAll(name, ...)` only visit the blocks that have a
+change under that name, so a feature with nothing tracked costs almost nothing to
+clean up (MagicSpells calls `undoAll` for every replace/destroy spell on reload).
+They return or undo changes oldest first within each block; blocks come in no
+particular order.
 
 Tests cover scheduler deadlines, early/bulk cancellation, stale callbacks, equal
 records, physics flag forwarding, and untimed compatibility with MockBukkit.

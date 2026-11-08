@@ -51,6 +51,12 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
 
     /** Tracked blocks by world UID, then chunk key. Kept in step with [alteredBlocks] for [getBlocksInBox]. */
     private val blocksByChunk: MutableMap<UUID, MutableMap<Long, MutableSet<Block>>> = HashMap()
+
+    /**
+     * Tracked blocks by internal name: each block with at least one active change under that name.
+     * Kept in step with [alteredBlocks] for [getByInternalName] and [undoAll].
+     */
+    private val blocksByName: MutableMap<String, MutableSet<Block>> = HashMap()
     private val logger: Logger = plugin.logger
     private val blockDataKey = NamespacedKey(plugin, "altered_block_data")
     private val blockStateKey = NamespacedKey(plugin, "altered_block_state")
@@ -63,6 +69,7 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
         val isNew = !alteredBlocks.containsKey(change.block)
         val alteredBlock = alteredBlocks.computeIfAbsent(change.block) { AlteredBlock(change) }
         alteredBlock.changes.add(change)
+        blocksByName.getOrPut(change.internalName) { HashSet() }.add(change.block)
         if (isNew) {
             indexBlock(change.block)
             alteredBlock.marker = spawnMarker(change.block, change.fromData, change.fromState)
@@ -90,6 +97,18 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
             if (chunks.isEmpty()) blocksByChunk.remove(worldId)
         }
     }
+
+    /** Drops [block] from [internalName]'s entry once none of its remaining changes use that name. */
+    private fun unindexName(internalName: String, block: Block, remaining: List<Change>) {
+        if (remaining.any { it.internalName == internalName }) return
+        val blocks = blocksByName[internalName] ?: return
+        blocks.remove(block)
+        if (blocks.isEmpty()) blocksByName.remove(internalName)
+    }
+
+    /** Block entries held by the name index, summed over names; for tests. */
+    internal val nameIndexedBlockCount: Int
+        get() = blocksByName.values.sumOf { it.size }
 
     /** Registers a supplied change and undoes it after [durationTicks] ticks with [applyPhysics]. */
     fun add(change: Change, applyPhysics: Boolean, durationTicks: Long) {
@@ -179,9 +198,15 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
 
     fun isTracked(block: Block): Boolean = alteredBlocks.containsKey(block)
 
+    /**
+     * Every active change under [internalName], oldest first within each block; blocks in no
+     * particular order. Cost grows with the blocks that have such a change, not every tracked block.
+     */
     fun getByInternalName(internalName: String): List<Change> {
         val result = ArrayList<Change>()
-        for (alteredBlock in alteredBlocks.values) {
+        val blocks = blocksByName[internalName] ?: return result
+        for (block in blocks) {
+            val alteredBlock = alteredBlocks[block] ?: continue
             for (change in alteredBlock.changes) {
                 if (change.internalName == internalName) {
                     result.add(change)
@@ -374,9 +399,11 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
                     manager.removeMarker(alteredBlock)
                     manager.alteredBlocks.remove(block)
                     manager.unindexBlock(block)
+                    manager.unindexName(internalName, block, emptyList())
                 } else {
                     restoreBlockState(fromData, fromState, applyPhysics)
                     alteredBlock.changes.removeAt(index)
+                    manager.unindexName(internalName, block, alteredBlock.changes)
                 }
             }
         }

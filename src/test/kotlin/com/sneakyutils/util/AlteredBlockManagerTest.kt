@@ -130,9 +130,13 @@ class AlteredBlockManagerTest {
         manager.add(second, false, 4L)
         second.undo(false)
         assertSame(first, manager.getByBlock(block).single())
+        assertSame(first, manager.getByInternalName("equal").single())
+        assertEquals(1, manager.nameIndexedBlockCount)
         assertEquals(1, server.scheduler.pendingTasks.count { it.owner === plugin })
         server.scheduler.performTicks(2)
         assertFalse(manager.isTracked(block))
+        assertTrue(manager.getByInternalName("equal").isEmpty())
+        assertEquals(0, manager.nameIndexedBlockCount)
         block.type = Material.SAND
         second.undo(false)
         server.scheduler.performTicks(2)
@@ -416,5 +420,72 @@ class AlteredBlockManagerTest {
         }
         assertTrue(manager.getBlocksInBox(world, -50, 0, -50, 50, 100, 50, listOf("s")).isEmpty())
         assertEquals(0, manager.indexedBlockCount)
+        assertTrue(manager.getByInternalName("s").isEmpty())
+        assertEquals(0, manager.nameIndexedBlockCount)
+    }
+
+    @Test
+    fun nameLookupFiltersAcrossBlocksAndWorlds() {
+        val manager = SneakyUtils.getAlteredBlockManager()
+        val other = server.addSimpleWorld("other")
+        val a = manager.apply("a", world.getBlockAt(1, 60, 1), Material.AIR, false)
+        val b = manager.apply("b", world.getBlockAt(2, 60, 2), Material.AIR, false)
+        val far = manager.apply("a", other.getBlockAt(-900, 60, 900), Material.AIR, false)
+
+        assertEquals(setOf(a, far), manager.getByInternalName("a").toSet())
+        assertEquals(listOf(b), manager.getByInternalName("b"))
+        assertTrue(manager.getByInternalName("missing").isEmpty())
+
+        manager.undoAll("a", false)
+        assertTrue(manager.getByInternalName("a").isEmpty())
+        assertEquals(listOf(b), manager.getByInternalName("b"))
+        assertEquals(1, manager.nameIndexedBlockCount)
+    }
+
+    @Test
+    fun nameLookupFollowsPartialUndoOnMixedBlock() {
+        val manager = SneakyUtils.getAlteredBlockManager()
+        val block = world.getBlockAt(1, 60, 1)
+        val a1 = manager.apply("a", block, Material.DIRT, false)
+        val b = manager.apply("b", block, Material.SAND, false)
+        val a2 = manager.apply("a", block, Material.GLASS, false)
+
+        // Oldest first within a block, as before the index.
+        assertEquals(listOf(a1, a2), manager.getByInternalName("a"))
+        assertEquals(2, manager.nameIndexedBlockCount)
+
+        a2.undo(false)
+        assertEquals(listOf(a1), manager.getByInternalName("a"))
+        assertEquals(listOf(b), manager.getByInternalName("b"))
+        assertEquals(2, manager.nameIndexedBlockCount)
+
+        b.undo(false)
+        assertTrue(manager.getByInternalName("b").isEmpty())
+        assertEquals(listOf(a1), manager.getByInternalName("a"))
+        assertEquals(1, manager.nameIndexedBlockCount)
+
+        a1.undo(false)
+        assertTrue(manager.getByInternalName("a").isEmpty())
+        assertEquals(0, manager.nameIndexedBlockCount)
+        assertEquals(Material.STONE, block.type)
+
+        // Tracked again after a full restore: found again.
+        val again = manager.apply("a", block, Material.DIRT, false)
+        assertEquals(listOf(again), manager.getByInternalName("a"))
+        assertEquals(1, manager.nameIndexedBlockCount)
+    }
+
+    @Test
+    fun undoAllRestoresSameNameStackOnOneBlock() {
+        val manager = SneakyUtils.getAlteredBlockManager()
+        val block = world.getBlockAt(3, 60, 3)
+        manager.apply("s", block, Material.DIRT, false)
+        manager.apply("s", block, Material.SAND, false)
+
+        manager.undoAll("s", false)
+
+        assertEquals(Material.STONE, block.type)
+        assertFalse(manager.isTracked(block))
+        assertEquals(0, manager.nameIndexedBlockCount)
     }
 }

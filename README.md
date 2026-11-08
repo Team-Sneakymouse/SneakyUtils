@@ -78,6 +78,15 @@ add(Change, boolean applyPhysics, long durationTicks): void
   An older change expiring first can overwrite a newer edit still tracked on that
   block. Coordinate overlapping lifetimes/LIFO undo in the consumer when necessary.
 
+### Finding tracked blocks near a place
+
+`getBlocksInBox(world, minX, minY, minZ, maxX, maxY, maxZ, internalNames)` returns the
+tracked blocks inside an inclusive block-coordinate box that have a change under one of
+the names, each once, in no particular order. It only looks at the chunks the box
+overlaps, so its cost does not grow with every tracked block on the server, unlike
+`getByInternalName`. For a sphere or cylinder, query a box that encloses it and apply
+the exact shape check to the result.
+
 Tests cover scheduler deadlines, early/bulk cancellation, stale callbacks, equal
 records, physics flag forwarding, and untimed compatibility with MockBukkit.
 Live Paper checks still needed: actual neighbor physics, tile-state restoration,

@@ -13,6 +13,7 @@ import org.bukkit.DyeColor
 import org.bukkit.Location
 import org.bukkit.Material
 import org.bukkit.NamespacedKey
+import org.bukkit.World
 import org.bukkit.block.Banner
 import org.bukkit.block.Block
 import org.bukkit.block.BlockState
@@ -47,6 +48,9 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
 
     private val pendingUndos = IdentityHashMap<Change, BukkitTask>()
     private val alteredBlocks: MutableMap<Block, AlteredBlock> = HashMap()
+
+    /** Tracked blocks by world UID, then chunk key. Kept in step with [alteredBlocks] for [getBlocksInBox]. */
+    private val blocksByChunk: MutableMap<UUID, MutableMap<Long, MutableSet<Block>>> = HashMap()
     private val logger: Logger = plugin.logger
     private val blockDataKey = NamespacedKey(plugin, "altered_block_data")
     private val blockStateKey = NamespacedKey(plugin, "altered_block_state")
@@ -60,7 +64,30 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
         val alteredBlock = alteredBlocks.computeIfAbsent(change.block) { AlteredBlock(change) }
         alteredBlock.changes.add(change)
         if (isNew) {
+            indexBlock(change.block)
             alteredBlock.marker = spawnMarker(change.block, change.fromData, change.fromState)
+        }
+    }
+
+    private fun indexBlock(block: Block) {
+        blocksByChunk.getOrPut(block.world.uid) { HashMap() }
+            .getOrPut(chunkKey(block.x shr 4, block.z shr 4)) { HashSet() }
+            .add(block)
+    }
+
+    /** Blocks held by the chunk index; equals the tracked block count when the index is in step. */
+    internal val indexedBlockCount: Int
+        get() = blocksByChunk.values.sumOf { chunks -> chunks.values.sumOf { it.size } }
+
+    private fun unindexBlock(block: Block) {
+        val worldId = block.world.uid
+        val chunks = blocksByChunk[worldId] ?: return
+        val key = chunkKey(block.x shr 4, block.z shr 4)
+        val blocks = chunks[key] ?: return
+        blocks.remove(block)
+        if (blocks.isEmpty()) {
+            chunks.remove(key)
+            if (chunks.isEmpty()) blocksByChunk.remove(worldId)
         }
     }
 
@@ -167,6 +194,53 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
     fun getByBlock(block: Block): List<Change> {
         val alteredBlock = alteredBlocks[block] ?: return emptyList()
         return ArrayList(alteredBlock.changes)
+    }
+
+    /**
+     * Tracked blocks in [world] inside the inclusive block-coordinate box that have at least one
+     * change under one of [internalNames]. Each block appears once, in no particular order.
+     *
+     * Cost grows with the tracked blocks in the chunks the box overlaps, not with every tracked
+     * block on the server. Callers needing a sphere or cylinder query a box around it and apply
+     * their exact shape check to the result. Pass a [Set] when there are many names.
+     */
+    fun getBlocksInBox(
+        world: World, minX: Int, minY: Int, minZ: Int, maxX: Int, maxY: Int, maxZ: Int,
+        internalNames: Collection<String>,
+    ): List<Block> {
+        val result = ArrayList<Block>()
+        if (internalNames.isEmpty() || minX > maxX || minY > maxY || minZ > maxZ) return result
+        val chunks = blocksByChunk[world.uid] ?: return result
+        val minCx = minX shr 4
+        val maxCx = maxX shr 4
+        val minCz = minZ shr 4
+        val maxCz = maxZ shr 4
+
+        fun collect(blocks: Set<Block>) {
+            for (block in blocks) {
+                if (block.x < minX || block.x > maxX || block.y < minY || block.y > maxY ||
+                    block.z < minZ || block.z > maxZ) continue
+                val changes = alteredBlocks[block]?.changes ?: continue
+                if (changes.any { it.internalName in internalNames }) result.add(block)
+            }
+        }
+
+        val boxChunks = (maxCx.toLong() - minCx + 1) * (maxCz.toLong() - minCz + 1)
+        if (boxChunks <= chunks.size) {
+            for (cx in minCx..maxCx) {
+                for (cz in minCz..maxCz) {
+                    chunks[chunkKey(cx, cz)]?.let { collect(it) }
+                }
+            }
+        } else {
+            // A box wider than the indexed area: walk the indexed chunks instead.
+            for ((key, blocks) in chunks) {
+                val cx = (key shr 32).toInt()
+                val cz = key.toInt()
+                if (cx in minCx..maxCx && cz in minCz..maxCz) collect(blocks)
+            }
+        }
+        return result
     }
 
     fun getByBlockAndInternalName(block: Block, internalName: String): List<Change> {
@@ -299,6 +373,7 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
                     restoreBlockState(alteredBlock.originalBlockData, alteredBlock.originalBlockState, applyPhysics)
                     manager.removeMarker(alteredBlock)
                     manager.alteredBlocks.remove(block)
+                    manager.unindexBlock(block)
                 } else {
                     restoreBlockState(fromData, fromState, applyPhysics)
                     alteredBlock.changes.removeAt(index)
@@ -317,6 +392,8 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
 
     companion object {
         private val COMPONENT_JSON = GsonComponentSerializer.gson()
+
+        private fun chunkKey(cx: Int, cz: Int): Long = (cx.toLong() shl 32) or (cz.toLong() and 0xffffffffL)
 
         /**
          * Serializes tile-entity state for cross-session marker restore (signs, containers, etc.).

@@ -285,4 +285,136 @@ class AlteredBlockManagerTest {
         assertEquals(Material.STONE, block.type)
         assertFalse(manager.isTracked(block))
     }
+
+    private fun boxNames(
+        manager: AlteredBlockManager, names: Collection<String>,
+        minX: Int, minY: Int, minZ: Int, maxX: Int, maxY: Int, maxZ: Int,
+        inWorld: org.bukkit.World = world,
+    ): Set<Triple<Int, Int, Int>> =
+        manager.getBlocksInBox(inWorld, minX, minY, minZ, maxX, maxY, maxZ, names)
+            .map { Triple(it.x, it.y, it.z) }.toSet()
+
+    @Test
+    fun boxQueryIsInclusiveAndFiltersByName() {
+        val manager = SneakyUtils.getAlteredBlockManager()
+        val inside = listOf(Triple(0, 60, 0), Triple(4, 62, 4), Triple(2, 61, 3))
+        val outside = listOf(
+            Triple(-1, 60, 0), Triple(5, 60, 0), Triple(0, 59, 0),
+            Triple(0, 63, 0), Triple(0, 60, -1), Triple(0, 60, 5),
+        )
+        for ((x, y, z) in inside + outside) manager.apply("wanted", world.getBlockAt(x, y, z), Material.AIR, false)
+        manager.apply("other", world.getBlockAt(1, 60, 1), Material.AIR, false)
+
+        assertEquals(inside.toSet(), boxNames(manager, listOf("wanted"), 0, 60, 0, 4, 62, 4))
+        assertEquals(setOf(Triple(1, 60, 1)), boxNames(manager, setOf("other"), 0, 60, 0, 4, 62, 4))
+        assertEquals(
+            (inside + Triple(1, 60, 1)).toSet(),
+            boxNames(manager, listOf("other", "wanted"), 0, 60, 0, 4, 62, 4),
+        )
+        assertTrue(boxNames(manager, emptyList(), 0, 60, 0, 4, 62, 4).isEmpty())
+        assertTrue(boxNames(manager, listOf("wanted"), 4, 60, 0, 0, 62, 4).isEmpty())
+    }
+
+    @Test
+    fun boxQuerySpansChunkBordersAndNegativeCoordinates() {
+        val manager = SneakyUtils.getAlteredBlockManager()
+        val spots = listOf(
+            Triple(-17, 60, -17), Triple(-16, 60, -1), Triple(-1, 60, 15),
+            Triple(15, 60, 16), Triple(16, 60, 0),
+        )
+        for ((x, y, z) in spots) manager.apply("s", world.getBlockAt(x, y, z), Material.AIR, false)
+        manager.apply("s", world.getBlockAt(40, 60, 40), Material.AIR, false)
+
+        assertEquals(spots.toSet(), boxNames(manager, listOf("s"), -17, 60, -17, 16, 60, 16))
+        assertEquals(
+            setOf(Triple(-16, 60, -1), Triple(-1, 60, 15)),
+            boxNames(manager, listOf("s"), -16, 0, -16, -1, 255, 15),
+        )
+    }
+
+    @Test
+    fun boxWiderThanIndexedAreaStillMatches() {
+        val manager = SneakyUtils.getAlteredBlockManager()
+        manager.apply("s", world.getBlockAt(3, 60, -3), Material.AIR, false)
+        manager.apply("s", world.getBlockAt(-5000, 60, 7000), Material.AIR, false)
+
+        val min = Int.MIN_VALUE
+        val max = Int.MAX_VALUE
+        assertEquals(
+            setOf(Triple(3, 60, -3), Triple(-5000, 60, 7000)),
+            boxNames(manager, listOf("s"), min, min, min, max, max, max),
+        )
+        assertEquals(setOf(Triple(3, 60, -3)), boxNames(manager, listOf("s"), -1000, 0, -1000, 1000, 255, 1000))
+    }
+
+    @Test
+    fun boxQueryListsBlockWithSeveralChangesOnce() {
+        val manager = SneakyUtils.getAlteredBlockManager()
+        val block = world.getBlockAt(2, 60, 2)
+        manager.apply("a", block, Material.DIRT, false)
+        manager.apply("a", block, Material.SAND, false)
+        manager.apply("b", block, Material.GLASS, false)
+
+        val found = manager.getBlocksInBox(world, 0, 0, 0, 5, 100, 5, listOf("a", "b"))
+        assertEquals(listOf(block), found)
+    }
+
+    @Test
+    fun boxQueryKeepsWorldsApart() {
+        val manager = SneakyUtils.getAlteredBlockManager()
+        val other = server.addSimpleWorld("other")
+        manager.apply("s", world.getBlockAt(1, 60, 1), Material.AIR, false)
+        manager.apply("s", other.getBlockAt(2, 60, 2), Material.AIR, false)
+
+        assertEquals(setOf(Triple(1, 60, 1)), boxNames(manager, listOf("s"), 0, 0, 0, 5, 100, 5))
+        assertEquals(setOf(Triple(2, 60, 2)), boxNames(manager, listOf("s"), 0, 0, 0, 5, 100, 5, other))
+    }
+
+    @Test
+    fun boxQueryFollowsUndo() {
+        val manager = SneakyUtils.getAlteredBlockManager()
+        val block = world.getBlockAt(1, 60, 1)
+        val older = manager.apply("a", block, Material.DIRT, false)
+        val newer = manager.apply("b", block, Material.SAND, false)
+        fun found(name: String) = manager.getBlocksInBox(world, 0, 0, 0, 5, 100, 5, listOf(name)).size
+
+        assertEquals(1, found("a"))
+        assertEquals(1, found("b"))
+        newer.undo(false)
+        assertEquals(1, found("a"))
+        assertEquals(0, found("b"))
+        assertEquals(1, manager.indexedBlockCount)
+        older.undo(false)
+        assertEquals(0, found("a"))
+        assertEquals(0, manager.indexedBlockCount)
+
+        // A block tracked again after being fully restored is indexed again.
+        manager.apply("a", block, Material.DIRT, false)
+        assertEquals(1, found("a"))
+        assertEquals(1, manager.indexedBlockCount)
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = ["timed", "undoAll", "restoreAll"])
+    fun boxQueryForgetsBlocksRestoredInBulkOrOnTimer(how: String) {
+        val manager = SneakyUtils.getAlteredBlockManager()
+        val a = world.getBlockAt(1, 60, 1)
+        val b = world.getBlockAt(20, 60, 20)
+        if (how == "timed") {
+            manager.apply("s", a, Material.AIR, false, 2L)
+            manager.apply("s", b, Material.AIR, false, 2L)
+        } else {
+            manager.apply("s", a, Material.AIR, false)
+            manager.apply("s", b, Material.AIR, false)
+        }
+        assertEquals(2, manager.getBlocksInBox(world, -50, 0, -50, 50, 100, 50, listOf("s")).size)
+
+        when (how) {
+            "timed" -> server.scheduler.performTicks(2)
+            "undoAll" -> manager.undoAll("s", false)
+            else -> manager.restoreAll()
+        }
+        assertTrue(manager.getBlocksInBox(world, -50, 0, -50, 50, 100, 50, listOf("s")).isEmpty())
+        assertEquals(0, manager.indexedBlockCount)
+    }
 }

@@ -130,9 +130,13 @@ class AlteredBlockManagerTest {
         manager.add(second, false, 4L)
         second.undo(false)
         assertSame(first, manager.getByBlock(block).single())
+        assertSame(first, manager.getByInternalName("equal").single())
+        assertEquals(1, manager.nameIndexedBlockCount)
         assertEquals(1, server.scheduler.pendingTasks.count { it.owner === plugin })
         server.scheduler.performTicks(2)
         assertFalse(manager.isTracked(block))
+        assertTrue(manager.getByInternalName("equal").isEmpty())
+        assertEquals(0, manager.nameIndexedBlockCount)
         block.type = Material.SAND
         second.undo(false)
         server.scheduler.performTicks(2)

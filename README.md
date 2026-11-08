@@ -90,8 +90,8 @@ the result.
 `getByInternalName(name)` and `undoAll(name, ...)` only visit the blocks that have a
 change under that name, so a feature with nothing tracked costs almost nothing to
 clean up (MagicSpells calls `undoAll` for every replace/destroy spell on reload).
-They return or undo changes oldest first within each block; blocks come in no
-particular order.
+Within each block, `getByInternalName` lists changes oldest first and `undoAll` undoes
+them newest first; blocks come in no particular order.
 
 Tests cover scheduler deadlines, early/bulk cancellation, stale callbacks, equal
 records, physics flag forwarding, and untimed compatibility with MockBukkit.

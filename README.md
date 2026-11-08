@@ -11,6 +11,7 @@ This is a live Paper plugin (not a compile-only library). Install the JAR on the
 - MagicsSpells-ported static helpers under `com.sneakyutils.util`: location/XP/color/params, `BlockUtils`, `EntityPdc` (injectable namespace), attribute/particle/sound/potion name resolution, geometry (`BoundingBox` / `bounds`), `AtomicFiles`, and small Bukkit/stdlib helpers
 - `com.sneakyutils.util.items.ItemBehaviors` — soulbinding and expiration, with utility-owned enforcement, scheduling and `ItemExpireEvent`
 - `PlayerUtil` — SCM noformat character names via optional PAPI, CMI-aware target eligibility, paladin on-duty checks, and Bukkit account-name lookups
+- `PlaceholderUtil` — optional PlaceholderAPI `setPlaceholders` for consumers that already depend on SneakyUtils (no local PAPI compile dependency required for expansion alone)
 - `ServerUtil` — server display name and kebab-case server id from the `P_SERVER_NAME` environment variable
 - `com.sneakyutils.watch.WatchEngine` — looking through a camera (from SneakyCCTV): eye held at the lens within a look cone, a mannequin body left behind, adventure/spectator watching with `WatchRestrictions`, left/right switching, crash-safe sessions file; one subclass per kind of camera (SneakyCCTV, SneakyHaunted's ghost cams), a player in one at a time. `Directions` holds the yaw/pitch/cone maths
 - Cross-plugin ports: `InventoryUtility` (Paper YAML + legacy Base64), `PermissionUtility`, `PoseFacing` / `Direction`, `ItemMetaText`
@@ -132,6 +133,23 @@ Tests cover scheduler deadlines, early/bulk cancellation, stale callbacks, equal
 records, physics flag forwarding, and untimed compatibility with MockBukkit.
 Live Paper checks still needed: actual neighbor physics, tile-state restoration,
 and crash/restart marker recovery; unit tests are not in-game verification.
+
+## Placeholder expansion
+
+`com.sneakyutils.util.PlaceholderUtil` wraps PlaceholderAPI for consumers that already
+depend on SneakyUtils and only need `setPlaceholders`:
+
+```java
+boolean present = PlaceholderUtil.isAvailable();
+String out = PlaceholderUtil.setPlaceholders(player, "Hello %player_name%");
+```
+
+Call on the **server thread**. When PlaceholderAPI is missing/disabled, `text` is
+null/empty, or it contains no `%`, the helper returns `text` unchanged. Linkage and
+runtime failures also return `text` unchanged. Prefer `PlayerUtil.getCharacterName`,
+`canTarget`, and `onDuty` when those specialized contracts already cover the need.
+Registering a `PlaceholderExpansion` still requires a direct PAPI compile dependency
+in the registering plugin.
 
 ## Player helpers
 

@@ -7,12 +7,11 @@ object PlayerUtil {
     /** SCM's registered noformat output, unchanged. Call on the server thread. */
     @JvmStatic
     fun getCharacterName(player: Player): String {
-        val plugins = Bukkit.getPluginManager()
-        if (!plugins.isPluginEnabled("SneakyCharacterManager") ||
-            !plugins.isPluginEnabled("PlaceholderAPI")) return player.name
+        if (!Bukkit.getPluginManager().isPluginEnabled("SneakyCharacterManager") ||
+            !PlaceholderUtil.isAvailable()) return player.name
         val placeholder = "%sneakycharacters_character_name_noformat%"
-        val name = me.clip.placeholderapi.PlaceholderAPI.setPlaceholders(player, placeholder)
-        return name.takeUnless { it.isBlank() || it == placeholder } ?: player.name
+        val name = PlaceholderUtil.setPlaceholders(player, placeholder)
+        return name.takeUnless { it.isNullOrBlank() || it == placeholder } ?: player.name
     }
 
     /**
@@ -28,9 +27,9 @@ object PlayerUtil {
             org.bukkit.GameMode.SPECTATOR -> false
         }
         if (!eligibleMode) return false
-        if (!Bukkit.getPluginManager().isPluginEnabled("PlaceholderAPI")) return true
+        if (!PlaceholderUtil.isAvailable()) return true
         val placeholder = "%cmi_user_vanished_symbol%"
-        val symbol = me.clip.placeholderapi.PlaceholderAPI.setPlaceholders(player, placeholder)
+        val symbol = PlaceholderUtil.setPlaceholders(player, placeholder) ?: return true
         return symbol.isEmpty() || symbol == placeholder
     }
 
@@ -40,10 +39,10 @@ object PlayerUtil {
      */
     @JvmStatic
     fun onDuty(player: Player): Boolean {
-        if (!Bukkit.getPluginManager().isPluginEnabled("PlaceholderAPI")) return false
-        return me.clip.placeholderapi.PlaceholderAPI.setPlaceholders(player, "%sneakydispatch_on_duty%")
+        if (!PlaceholderUtil.isAvailable()) return false
+        return PlaceholderUtil.setPlaceholders(player, "%sneakydispatch_on_duty%")
             .equals("true", ignoreCase = true) &&
-            me.clip.placeholderapi.PlaceholderAPI.setPlaceholders(player, "%sneakycharacters_character_hastag_paladin%")
+            PlaceholderUtil.setPlaceholders(player, "%sneakycharacters_character_hastag_paladin%")
                 .equals("true", ignoreCase = true)
     }
 

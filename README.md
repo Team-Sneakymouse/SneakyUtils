@@ -9,7 +9,7 @@ This is a live Paper plugin (not a compile-only library). Install the JAR on the
 - `TextUtility` — Unicode escape decoding (`\uXXXX` / `\UXXXXXXXX`), legacy `&`/`§` → MiniMessage → Adventure `Component`, plus balanced line wrapping
 - `AlteredBlockManager` — reversible temporary block changes with persistent Marker fallback (scoreboard tag `sneakyutils_altered_block`, PDC keys under `sneakyutils:`)
 - MagicsSpells-ported static helpers under `com.sneakyutils.util`: location/XP/color/params, `BlockUtils`, `EntityPdc` (injectable namespace), attribute/particle/sound/potion name resolution, geometry (`BoundingBox` / `bounds`), `AtomicFiles`, and small Bukkit/stdlib helpers
-- `PlayerUtil` — SCM noformat character names via optional PAPI, CMI-aware target eligibility, paladin on-duty checks, and Bukkit account-name lookups
+- `PlayerUtil` — SCM noformat character names via optional PAPI, CMI-aware target eligibility, dispatch on-duty checks, and Bukkit account-name lookups
 - `PlaceholderUtil` — optional PlaceholderAPI `setPlaceholders` for consumers that already depend on SneakyUtils (no local PAPI compile dependency required for expansion alone)
 - `DisplayOnlyInventoryHolder` — marker for display-only GUI inventory holders; whole-inventory scans on open (SneakyItems updater, expiration) skip them; the owning plugin must keep real items out of the slots. `DisplayOnlyInventoryHolder.isDisplayOnly(inventory)` checks it
 - `ServerUtil` — server display name and kebab-case server id from the `P_SERVER_NAME` environment variable
@@ -124,7 +124,7 @@ in the registering plugin.
 String name = PlayerUtil.getCharacterName(player);
 boolean target = PlayerUtil.canTarget(player);       // creative excluded
 boolean creativeTarget = PlayerUtil.canTarget(player, true);
-boolean onDuty = PlayerUtil.onDuty(player);          // dispatch duty AND paladin tag
+boolean onDuty = PlayerUtil.onDuty(player);          // dispatch duty (paladin character required by Dispatch)
 Player exact = PlayerUtil.getPlayerExact("MinecraftName");
 Player partial = PlayerUtil.getPlayer("Minecraft");
 ```
@@ -158,19 +158,19 @@ registers `character_name_noformat` via `getNameUnformatted()`;
 `commands/CommandSkin.java` lacks the nametag unresolved-token guard; this helper
 uses the nametag contract, so unavailable CMI does not hide every player.
 
-`onDuty(Player)` returns true only when **both** `%sneakydispatch_on_duty%` and
-`%sneakycharacters_character_hastag_paladin%` resolve to `true` (case-insensitive,
-without trimming). It reads current values each call through PAPI; missing/disabled
-PAPI, missing expansions, null/unresolved responses and any other output return
-false. There is no hard dependency or reverse classpath link to SCM or Dispatch.
-Call on the **server thread**. Provider exceptions are not swallowed. Tests cover
-real PAPI parsing/dispatch with test expansions, not the running providers; live
-Paper verification still needs duty toggles, paladin tag/character changes and
-optional PAPI absence/classloading checks.
+`onDuty(Player)` returns true only when `%sneakydispatch_on_duty%` resolves to
+`true` (case-insensitive, without trimming). SneakyDispatch itself returns `false`
+while the player is on a non-paladin character (SCM `character_hastag_paladin`), so
+this helper no longer checks the tag. It reads the current value each call through
+PAPI; missing/disabled PAPI, a missing expansion, null/unresolved responses and any
+other output return false. There is no hard dependency or reverse classpath link to
+Dispatch. Call on the **server thread**. Tests cover real PAPI parsing/dispatch with
+test expansions, not the running provider; live Paper verification still needs duty
+toggles, character switches and optional PAPI absence/classloading checks.
 
 Source contract verified in SneakyDispatch's `Placeholders.kt` (`on_duty`, with
-identifier `sneakydispatch`) and SCM's `handlers/Placeholders.java`
-(`character_hastag_`, with identifier `sneakycharacters`).
+identifier `sneakydispatch`; requires SneakyDispatch with the paladin-character
+check, otherwise non-paladin characters in a unit read as on duty).
 
 ### Migration and verification
 

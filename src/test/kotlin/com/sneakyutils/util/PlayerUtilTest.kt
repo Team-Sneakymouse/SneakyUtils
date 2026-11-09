@@ -60,7 +60,7 @@ class PlayerUtilTest {
     }
 
     @Test
-    fun `onDuty requires both current dispatch duty and paladin tag`() {
+    fun `onDuty follows current dispatch duty and ignores paladin tag`() {
         MockBukkit.createMockPlugin("PlaceholderAPI")
         var duty = "false"
         var paladin = "false"
@@ -72,7 +72,7 @@ class PlayerUtilTest {
             for (tag in listOf("false", "true")) {
                 duty = dispatch
                 paladin = tag
-                assertEquals(dispatch == "true" && tag == "true", onDuty.invoke(null, player))
+                assertEquals(dispatch == "true", onDuty.invoke(null, player))
             }
         }
         duty = "false"
@@ -81,17 +81,11 @@ class PlayerUtilTest {
 
     @ParameterizedTest
     @NullAndEmptySource
-    @ValueSource(strings = ["false", "1", "yes", " true ", "%sneakydispatch_on_duty%", "%sneakycharacters_character_hastag_paladin%"])
-    fun `onDuty rejects nontrue or unresolved output from either expansion`(output: String?) {
+    @ValueSource(strings = ["false", "1", "yes", " true ", "%sneakydispatch_on_duty%"])
+    fun `onDuty rejects nontrue or unresolved dispatch output`(output: String?) {
         MockBukkit.createMockPlugin("PlaceholderAPI")
-        var duty: String? = output
-        var paladin: String? = "true"
-        expansion("sneakydispatch", "on_duty") { duty }
-        expansion("sneakycharacters", "character_hastag_paladin") { paladin }
+        expansion("sneakydispatch", "on_duty") { output }
         val player = server.addPlayer()
-        assertFalse(PlayerUtil.onDuty(player))
-        duty = "true"
-        paladin = output
         assertFalse(PlayerUtil.onDuty(player))
     }
 
@@ -102,15 +96,10 @@ class PlayerUtilTest {
         val papi = MockBukkit.createMockPlugin("PlaceholderAPI")
         assertFalse(PlayerUtil.onDuty(player))
         val dispatch = expansion("sneakydispatch", "on_duty") { "TrUe" }
-        assertFalse(PlayerUtil.onDuty(player))
-        val scm = expansion("sneakycharacters", "character_hastag_paladin") { "TRUE" }
         assertTrue(PlayerUtil.onDuty(player))
         dispatch.unregister()
         assertFalse(PlayerUtil.onDuty(player))
         dispatch.register()
-        scm.unregister()
-        assertFalse(PlayerUtil.onDuty(player))
-        scm.register()
         assertTrue(PlayerUtil.onDuty(player))
         server.pluginManager.disablePlugin(papi)
         assertFalse(PlayerUtil.onDuty(player))

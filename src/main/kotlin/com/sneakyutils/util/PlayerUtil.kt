@@ -34,16 +34,15 @@ object PlayerUtil {
     }
 
     /**
-     * True only when dispatch duty and SCM's paladin tag both resolve to true.
-     * Call on the server thread; unavailable PAPI/expansions return false.
+     * True when SneakyDispatch's on_duty resolves to true. Dispatch already
+     * requires a paladin character. Call on the server thread; unavailable
+     * PAPI/expansion returns false.
      */
     @JvmStatic
     fun onDuty(player: Player): Boolean {
         if (!PlaceholderUtil.isAvailable()) return false
         return PlaceholderUtil.setPlaceholders(player, "%sneakydispatch_on_duty%")
-            .equals("true", ignoreCase = true) &&
-            PlaceholderUtil.setPlaceholders(player, "%sneakycharacters_character_hastag_paladin%")
-                .equals("true", ignoreCase = true)
+            .equals("true", ignoreCase = true)
     }
 
     @JvmStatic

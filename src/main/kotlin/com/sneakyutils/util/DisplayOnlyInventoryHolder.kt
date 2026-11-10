@@ -10,8 +10,10 @@ import org.bukkit.inventory.InventoryHolder
  * handling such as click events still runs, so the owning plugin must cancel any
  * transfer that would put a real item into a GUI slot.
  *
- * Implement it on the custom holder you pass to `Bukkit.createInventory`. Never implement it
- * on a holder whose inventory stores real items (vaults, bags, backpacks).
+ * Implement it on the custom holder you pass to `Bukkit.createInventory`. Prefer Paper
+ * `MenuType.create` for location-free views when no custom holder is needed (see MagicsSpells
+ * MenuSpell + `SneakyItemsAPI.registerMenuInventorySkip`). Never implement it on a holder
+ * whose inventory stores real items (vaults, bags, backpacks).
  */
 interface DisplayOnlyInventoryHolder : InventoryHolder {
     companion object {

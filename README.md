@@ -12,7 +12,7 @@ This is a live Paper plugin (not a compile-only library). Install the JAR on the
 - `PlayerUtil` — SCM noformat character names via optional PAPI, CMI-aware target eligibility, dispatch on-duty checks, and Bukkit account-name lookups
 - `PlaceholderUtil` — optional PlaceholderAPI `setPlaceholders` for consumers that already depend on SneakyUtils (no local PAPI compile dependency required for expansion alone)
 - `DisplayOnlyInventoryHolder` — marker for display-only GUI inventory holders; whole-inventory scans on open (SneakyItems updater, expiration) skip them; the owning plugin must keep real items out of the slots. `DisplayOnlyInventoryHolder.isDisplayOnly(inventory)` checks it
-- `ServerUtil` — server display name and kebab-case server id from the `P_SERVER_NAME` environment variable
+- `ServerUtil` — server display name and kebab-case server id from the `P_SERVER_NAME` environment variable. Platform-free (in `sneakyutils-common`), so Velocity plugins can use it too
 - `com.sneakyutils.watch.WatchEngine` — looking through a camera (from SneakyCCTV): eye held at the lens within a look cone, a mannequin body left behind, adventure/spectator watching with `WatchRestrictions`, left/right switching, crash-safe sessions file; one subclass per kind of camera (SneakyCCTV, SneakyHaunted's ghost cams), a player in one at a time. `Directions` holds the yaw/pitch/cone maths
 - Cross-plugin ports: `InventoryUtility` (Paper YAML + legacy Base64), `PermissionUtility`, `PoseFacing` / `Direction`, `ItemMetaText`
 
@@ -35,6 +35,27 @@ dependencies {
 ```
 
 Ensure `SneakyUtils` is installed and loads before plugins that call `SneakyUtils.getAlteredBlockManager()`.
+
+### Platform-free helpers (`sneakyutils-common`)
+
+Helpers with no Paper, Velocity or Kotlin dependency (currently `ServerUtil`) live in the
+`common/` module, published as `io.github.team-sneakymouse:sneakyutils-common:<version>` with the
+same version as `sneakyutils`. It is plain Java compiled for Java 17 and has no runtime dependencies.
+
+- **Paper plugins:** change nothing. `sneakyutils` re-exports `sneakyutils-common` and the
+  SneakyUtils plugin jar bundles it, so keep `compileOnly(sneakyutils)` and the `SneakyUtils`
+  `depend`. Do not also bundle `sneakyutils-common` in a Paper plugin.
+- **Velocity (and other non-Paper) plugins:** SneakyUtils is not installed there, so bundle the
+  module into your plugin jar, relocating it if you shade:
+
+```kotlin
+dependencies {
+    implementation("io.github.team-sneakymouse:sneakyutils-common:VERSION")
+}
+```
+
+Add a helper here only when it needs nothing beyond the JDK. Anything that touches Bukkit/Paper
+stays in the root module.
 
 Soulbound/expiration item behaviors moved to **SneakyItems** (`com.sneakyitems.util.items.ItemBehaviors`,
 `ItemExpireEvent`). PDC keys remain `magicspells:soulbound_owner` / `magicspells:expires_at`.
@@ -193,8 +214,9 @@ formatting quirks are intentionally preserved, not repaired in SneakyUtils.
 
 ## Server identity
 
-`com.sneakyutils.util.ServerUtil` exposes Java-static (Kotlin-callable) getters
-that read the `P_SERVER_NAME` environment variable on each call:
+`com.sneakyutils.util.ServerUtil` (in [`sneakyutils-common`](#platform-free-helpers-sneakyutils-common),
+usable on Paper and Velocity) exposes static getters that read the `P_SERVER_NAME` environment
+variable on each call:
 
 ```java
 @Nullable String name = ServerUtil.getServerName(); // "Dev Main"
@@ -213,9 +235,10 @@ that read the `P_SERVER_NAME` environment variable on each call:
 - `getServerId()` returns `null` whenever `getServerName()` does, and also when the
   name has no letters or digits (e.g. `---`).
 
-Both values are nullable: handle `null` explicitly rather than substituting a
-default identity. There is no config file or command; the environment is set by
-the server host. Tests cover the derivation and read a real test-JVM
+Both values are nullable (JSpecify `@Nullable`): handle `null` explicitly rather than
+substituting a default identity. There is no config file or command; the environment is set by
+the server host. On a proxy, set `P_SERVER_NAME` for the proxy process itself; it does not see
+the backends' values. Tests cover the derivation and read a real test-JVM
 environment; live servers' `P_SERVER_NAME` values are not verified here.
 
 ## Versioning

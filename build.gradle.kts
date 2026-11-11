@@ -5,14 +5,13 @@ import java.time.format.DateTimeFormatter
 
 plugins {
     kotlin("jvm") version "2.3.21"
+    `java-library`
     id("xyz.jpenilla.run-paper") version "3.0.2"
     `maven-publish`
 }
 
-group = "io.github.team-sneakymouse"
-
 // Requires a git checkout with at least one commit (CI and local clones).
-version =
+val gitVersion =
     providers.exec {
         workingDir(rootDir)
         commandLine("git", "show", "-s", "--format=%ct:%h", "--abbrev=12", "HEAD")
@@ -24,6 +23,12 @@ version =
         "$date-$hash"
     }.get()
 
+// Shared by the Paper plugin and :common so the published versions always match.
+allprojects {
+    group = "io.github.team-sneakymouse"
+    version = gitVersion
+}
+
 repositories {
     mavenCentral()
     maven("https://repo.extendedclip.com/content/repositories/placeholderapi/")
@@ -34,6 +39,8 @@ val paperApi = "26.2.build.+"
 val mockBukkitVersion = "4.117.0"
 
 dependencies {
+    // api: compileOnly consumers of sneakyutils still see ServerUtil. Bundled into the plugin jar below.
+    api(project(":common"))
     compileOnly("io.papermc.paper:paper-api:$paperApi")
     compileOnly("com.google.code.gson:gson:2.11.0")
     compileOnly("me.clip:placeholderapi:2.11.5")
@@ -73,7 +80,9 @@ tasks {
     jar {
         archiveBaseName.set(rootProject.name)
         archiveFileName.set("${rootProject.name}-${project.version}.jar")
-        from(configurations.runtimeClasspath.get().map { if (it.isDirectory) it else zipTree(it) })
+        // Lazy, with dependsOn, so :common:jar is built before it is bundled.
+        dependsOn(configurations.runtimeClasspath)
+        from({ configurations.runtimeClasspath.get().map { if (it.isDirectory) it else zipTree(it) } })
         duplicatesStrategy = DuplicatesStrategy.EXCLUDE
     }
 
@@ -83,8 +92,6 @@ tasks {
 
     test {
         useJUnitPlatform()
-        // Real-environment fixture for ServerUtilEnvironmentTest.
-        environment("P_SERVER_NAME", "Dev Main")
     }
 
     val publishPreflight by registering(Exec::class) {

@@ -40,7 +40,7 @@ Ensure `SneakyUtils` is installed and loads before plugins that call `SneakyUtil
 
 Helpers with no Paper, Velocity or Kotlin dependency (currently `ServerUtil`) live in the
 `common/` module, published as `io.github.team-sneakymouse:sneakyutils-common:<version>` with the
-same version as `sneakyutils`. It is plain Java compiled for Java 17 and has no runtime dependencies.
+same version as `sneakyutils`. It is plain Java (Java 25, like the rest of the build) and has no runtime dependencies.
 
 - **Paper plugins:** change nothing. `sneakyutils` re-exports `sneakyutils-common` and the
   SneakyUtils plugin jar bundles it, so keep `compileOnly(sneakyutils)` and the `SneakyUtils`

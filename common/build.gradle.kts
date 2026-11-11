@@ -26,11 +26,6 @@ java {
 }
 
 tasks {
-    // Bytecode for Java 17 so older proxies (Velocity 3.x) can load it.
-    compileJava {
-        options.release.set(17)
-    }
-
     test {
         useJUnitPlatform()
         // Real-environment fixture for ServerUtilEnvironmentTest.

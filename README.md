@@ -10,6 +10,13 @@ This is a live Paper plugin (not a compile-only library). Install the JAR on the
 - `AlteredBlockManager` — reversible temporary block changes with persistent Marker fallback (scoreboard tag `sneakyutils_altered_block`, PDC keys under `sneakyutils:`)
 - MagicsSpells-ported static helpers under `com.sneakyutils.util`: location/XP/color/params, `BlockUtils`, `EntityPdc` (injectable namespace), attribute/particle/sound/potion name resolution, geometry (`BoundingBox` / `bounds`), `AtomicFiles`, and small Bukkit/stdlib helpers
 - `PlayerUtil` — SCM noformat character names via optional PAPI, CMI-aware target eligibility, dispatch on-duty checks, and Bukkit account-name lookups
+- `PlayerUtil.conceal(owner, player)` / `reveal(owner, player)` / `isConcealed(player)` (`PlayerConcealment`) — hide a player from everyone, themselves included, without spectator mode or `hidePlayer`. Concealing a player:
+  - makes them invisible;
+  - sends their held items and armour to other players as empty (a packet filter, so the server re-sending them doesn't undo it);
+  - shows them their own armour, hotbar and offhand as empty;
+  - hides everything riding them (worn cosmetics, nametag displays) from every viewer.
+
+  They stay a real entity and stay in the tab list. Each owning plugin counts separately, so one plugin's `reveal` doesn't undo another's. Concealment comes off on quit and when SneakyUtils disables. Used by `WatchEngine` watchers and SneakyPoses sleepers
 - `PlaceholderUtil` — optional PlaceholderAPI `setPlaceholders` for consumers that already depend on SneakyUtils (no local PAPI compile dependency required for expansion alone)
 - `DisplayOnlyInventoryHolder` — marker for display-only GUI inventory holders; whole-inventory scans on open (SneakyItems updater, expiration) skip them; the owning plugin must keep real items out of the slots. `DisplayOnlyInventoryHolder.isDisplayOnly(inventory)` checks it
 - `ServerUtil` — server display name and kebab-case server id from the `P_SERVER_NAME` environment variable. Platform-free (in `sneakyutils-common`), so Velocity plugins can use it too

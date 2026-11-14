@@ -1,7 +1,9 @@
 package com.sneakyutils.util
 
+import com.sneakyutils.SneakyUtils
 import org.bukkit.Bukkit
 import org.bukkit.entity.Player
+import org.bukkit.plugin.Plugin
 
 object PlayerUtil {
     /** SCM's registered noformat output, unchanged. Call on the server thread. */
@@ -50,4 +52,27 @@ object PlayerUtil {
 
     @JvmStatic
     fun getPlayer(playerName: String): Player? = Bukkit.getPlayer(playerName)
+
+    /**
+     * Hides player from everyone, themselves included, without spectator mode: invisible, their held items and armour
+     * sent to others as empty, their own armour/hotbar/offhand shown to them as empty, and everything riding them
+     * (worn cosmetics, nametags) hidden. They stay a real entity and stay in the tab list. Counted per owner: they're
+     * revealed only when every plugin that concealed them calls [reveal]. Revealed on quit. Server thread.
+     * See [PlayerConcealment].
+     */
+    @JvmStatic
+    fun conceal(owner: Plugin, player: Player) {
+        val c = SneakyUtils.getPlayerConcealment() ?: error("SneakyUtils is not enabled; can't conceal players")
+        c.conceal(owner, player)
+    }
+
+    /** owner stops concealing player (see [conceal]); nothing happens if owner wasn't concealing them. */
+    @JvmStatic
+    fun reveal(owner: Plugin, player: Player) {
+        SneakyUtils.getPlayerConcealment()?.reveal(owner, player)
+    }
+
+    /** Whether any plugin conceals player ([conceal]). */
+    @JvmStatic
+    fun isConcealed(player: Player): Boolean = SneakyUtils.getPlayerConcealment()?.isConcealed(player) == true
 }

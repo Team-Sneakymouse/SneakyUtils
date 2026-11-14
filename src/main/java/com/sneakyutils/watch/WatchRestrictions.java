@@ -75,7 +75,6 @@ public final class WatchRestrictions implements Listener {
     public void onWatcherHeld(org.bukkit.event.player.PlayerItemHeldEvent e) {
         if (!engine.watchingHere(e.getPlayer())) return;
         engine.input(e.getPlayer());
-        engine.hideGearSoon(e.getPlayer());         // what they hold now would show
     }
 
     @EventHandler(priority = EventPriority.LOWEST)
@@ -83,15 +82,6 @@ public final class WatchRestrictions implements Listener {
         if (engine.watchingHere(e.getPlayer())) engine.input(e.getPlayer());
     }
 
-    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
-    public void onWatcherArmour(com.destroystokyo.paper.event.player.PlayerArmorChangeEvent e) {
-        if (engine.watchingHere(e.getPlayer())) engine.hideGearSoon(e.getPlayer());
-    }
-
-    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
-    public void onWatcherInventory(org.bukkit.event.inventory.InventoryClickEvent e) {
-        if (e.getWhoClicked() instanceof Player p && engine.watchingHere(p)) engine.hideGearSoon(p);
-    }
     @EventHandler(priority = EventPriority.LOWEST)
     public void onWatcherPickup(org.bukkit.event.entity.EntityPickupItemEvent e) {
         if (engine.watchingHere(e.getEntity())) e.setCancelled(true);

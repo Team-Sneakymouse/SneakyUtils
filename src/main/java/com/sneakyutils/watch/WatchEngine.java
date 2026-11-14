@@ -61,7 +61,8 @@ import static com.sneakyutils.util.Directions.yawOf;
  * their eye at the feed's lens, looking about within a cone, while a mannequin in their skin and clothes stands where
  * they were. Sneak to come back; hitting the body, a teleport from elsewhere, leaving the game or the plugin stopping
  * also bring them back. Watching is in adventure mode (shrunk, invisible, touching nothing; {@link WatchRestrictions})
- * or, with {@code watch-mode: spectator}, in spectator mode. Who is watching is kept in a sessions file until they stop,
+ * or, with {@code watch-mode: spectator}, in spectator mode. Either way the watcher is concealed
+ * ({@link PlayerUtil#conceal}): invisible, gear masked for everyone including themselves, riders hidden. Who is watching is kept in a sessions file until they stop,
  * so a crash mid-watch puts them back where they stood when they next join.
  *
  * <p>One engine per kind of camera. A plugin subclasses this with its feed type F, says how to find a feed and where
@@ -71,9 +72,9 @@ import static com.sneakyutils.util.Directions.yawOf;
  * A player watches through one engine at a time.
  *
  * <p>Settings (from {@link #settings()}): {@code watch-mode}, {@code body-name}, {@code sleeping-body.*},
- * {@code forward-damage}, {@code hide-watcher-gear}, {@code empty-hand}, {@code switch-keys}.
+ * {@code forward-damage}, {@code empty-hand}, {@code switch-keys}.
  *
- * <p>Anything that starts or ends a watch must keep the sessions file current and restore game mode, body, hidden gear
+ * <p>Anything that starts or ends a watch must keep the sessions file current and restore game mode, body, concealment
  * and the hooks' own changes, including the quit, death, disable and feed-removal paths.
  */
 public abstract class WatchEngine<F> implements Listener {
@@ -300,8 +301,8 @@ public abstract class WatchEngine<F> implements Listener {
             }
             s = new WatchSession(p);
             sessions.put(p.getUniqueId(), s);
-            hideGearSoon(p);
             leaveBody(p, s);
+            PlayerUtil.conceal(plugin, p);                             // after leaveBody: their riders are on the body
             saveSessions();
             if (adventureWatching()) {
                 startAdventure(p, s);
@@ -477,6 +478,7 @@ public abstract class WatchEngine<F> implements Listener {
         if (zzz != null) zzz.remove();
         if (s.ticketWorld != null) s.ticketWorld.removePluginChunkTicket(s.ticketX, s.ticketZ, plugin);
         if (s.adventure) endAdventure(p, s);
+        PlayerUtil.reveal(plugin, p);                                  // before remount: their riders show again
         lastInput.remove(p.getUniqueId());
         p.setGameMode(s.mode);
         p.setFlySpeed(s.flySpeed);
@@ -488,12 +490,6 @@ public abstract class WatchEngine<F> implements Listener {
         }
         if (!riders.isEmpty()) remount(p, riders, 0);
         if (s.allowFlight) p.setFlying(s.flying);
-        if (hidesGear()) {
-            showGear(p);
-            Bukkit.getScheduler().runTaskLater(plugin, () -> {        // and again once they've arrived (anyone new in range)
-                if (!watchingHere(p)) showGear(p);
-            }, 2L);
-        }
         p.setFallDistance(0);
         saveSessions();
         if (why != null) p.sendActionBar(why);
@@ -529,9 +525,9 @@ public abstract class WatchEngine<F> implements Listener {
 
     /**
      * Watching without spectator mode, so there are no spectator controls and invisible entities stay invisible to
-     * them: adventure mode, flying at no speed, invisible, not pushing or pushed, shrunk to the smallest scale (so their
-     * eye can sit at the camera without the rest of them in a wall or floor), and their hand on an empty hotbar slot if
-     * there's one. {@link WatchRestrictions} keeps them from touching anything meanwhile.
+     * them: adventure mode, flying at no speed, not pushing or pushed (and concealed, as every watcher is), shrunk to
+     * the smallest scale (so their eye can sit at the camera without the rest of them in a wall or floor), and their
+     * hand on an empty hotbar slot if there's one. {@link WatchRestrictions} keeps them from touching anything meanwhile.
      */
     private void startAdventure(Player p, WatchSession s) {
         s.adventure = true;
@@ -539,7 +535,6 @@ public abstract class WatchEngine<F> implements Listener {
         p.setAllowFlight(true);
         p.setFlying(true);
         p.setFlySpeed(0f);
-        p.setInvisible(true);
         p.setCollidable(false);
         p.setFireTicks(0);
         shrink(p, true);
@@ -560,7 +555,6 @@ public abstract class WatchEngine<F> implements Listener {
 
     private void endAdventure(Player p, WatchSession s) {
         shrink(p, false);
-        p.setInvisible(s.invisible);
         p.setCollidable(s.collidable);
         if (s.heldSlot >= 0 && s.heldSlot < 9) p.getInventory().setHeldItemSlot(s.heldSlot);
     }
@@ -583,14 +577,17 @@ public abstract class WatchEngine<F> implements Listener {
         lastInput.put(p.getUniqueId(), now());
     }
 
-    // a watcher's held items and armour, hidden from everyone else (they'd float at the camera, where anyone
-    // else watching it sees them in front of their eyes)
+    // A watcher's held items and armour, hidden from everyone else (they'd float at the camera, where anyone else
+    // watching it sees them in front of their eyes). Watchers are concealed now (PlayerUtil.conceal), which masks
+    // their gear for as long as they watch; these one-off sends are only kept for plugins built against older
+    // versions that still call them.
 
     private boolean hidesGear() {
         return settings().getBoolean("hide-watcher-gear", true);
     }
 
     /** Sends everyone else (in their world) nothing in p's hands or on them. */
+    @Deprecated
     public void hideGear(Player p) {
         if (!hidesGear() || !p.isValid()) return;
         Map<EquipmentSlot, ItemStack> none = new java.util.EnumMap<>(EquipmentSlot.class);
@@ -599,6 +596,7 @@ public abstract class WatchEngine<F> implements Listener {
     }
 
     /** hideGear on the next tick (after the server has sent the change it's reacting to). */
+    @Deprecated
     public void hideGearSoon(Player p) {
         if (hidesGear()) Bukkit.getScheduler().runTask(plugin, () -> {
             if (watchingHere(p)) hideGear(p);
@@ -606,6 +604,7 @@ public abstract class WatchEngine<F> implements Listener {
     }
 
     /** Sends everyone else what p really holds and wears again. */
+    @Deprecated
     public void showGear(Player p) {
         if (!p.isValid()) return;
         Map<EquipmentSlot, ItemStack> worn = new java.util.EnumMap<>(EquipmentSlot.class);

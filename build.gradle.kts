@@ -44,6 +44,8 @@ dependencies {
     compileOnly("io.papermc.paper:paper-api:$paperApi")
     compileOnly("com.google.code.gson:gson:2.11.0")
     compileOnly("me.clip:placeholderapi:2.11.5")
+    // PlayerConcealment's packet handler; the server provides Netty.
+    compileOnly("io.netty:netty-transport:4.2.15.Final")
     implementation("org.jetbrains.kotlin:kotlin-stdlib:2.3.21")
 
     testImplementation("io.papermc.paper:paper-api:$paperApi")
@@ -51,6 +53,7 @@ dependencies {
     testImplementation("org.junit.jupiter:junit-jupiter:5.11.4")
     testImplementation("org.mockbukkit.mockbukkit:mockbukkit-v26.2:$mockBukkitVersion")
     testImplementation("me.clip:placeholderapi:2.11.5")
+    testImplementation("io.netty:netty-transport:4.2.15.Final")
     testImplementation("org.mockito:mockito-core:5.21.0")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }

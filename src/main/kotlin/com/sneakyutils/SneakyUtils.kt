@@ -2,6 +2,7 @@ package com.sneakyutils
 
 import com.sneakyutils.util.AlteredBlockListener
 import com.sneakyutils.util.AlteredBlockManager
+import com.sneakyutils.util.PlayerConcealment
 import org.bukkit.plugin.java.JavaPlugin
 
 /**
@@ -25,6 +26,12 @@ open class SneakyUtils : JavaPlugin() {
             alteredBlockManager
                 ?: error("SneakyUtils is not enabled; AlteredBlockManager is unavailable")
 
+        private var playerConcealment: PlayerConcealment? = null
+
+        /** Concealed players ([com.sneakyutils.util.PlayerUtil.conceal]); null while SneakyUtils isn't enabled. */
+        @JvmStatic
+        fun getPlayerConcealment(): PlayerConcealment? = playerConcealment
+
         fun log(message: String) {
             instance.logger.info(message)
         }
@@ -37,10 +44,13 @@ open class SneakyUtils : JavaPlugin() {
     override fun onEnable() {
         alteredBlockManager = AlteredBlockManager(this)
         server.pluginManager.registerEvents(AlteredBlockListener(), this)
+        playerConcealment = PlayerConcealment(this).also { it.start() }
         logger.info("SneakyUtils enabled.")
     }
 
     override fun onDisable() {
+        playerConcealment?.shutdown()
+        playerConcealment = null
         alteredBlockManager?.restoreAll()
         alteredBlockManager = null
         logger.info("SneakyUtils disabled.")

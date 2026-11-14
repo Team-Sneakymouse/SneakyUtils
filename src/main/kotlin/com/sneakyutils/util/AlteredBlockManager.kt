@@ -440,14 +440,15 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
                     root.add("back", serializeSignSide(state.getSide(Side.BACK)))
                     root.addProperty("waxed", state.isWaxed)
                 }
-                is Container -> {
-                    root.addProperty("kind", "container")
-                    root.addProperty("items", encodeItems(state.inventory.contents))
-                }
+                // Lectern before Container: MockBukkit's LecternStateMock is a Container.
                 is Lectern -> {
                     root.addProperty("kind", "lectern")
-                    root.addProperty("items", encodeItems(state.inventory.contents))
+                    root.addProperty("items", encodeItems(state.snapshotInventory.contents))
                     root.addProperty("page", state.page)
+                }
+                is Container -> {
+                    root.addProperty("kind", "container")
+                    root.addProperty("items", encodeItems(state.snapshotInventory.contents))
                 }
                 is CreatureSpawner -> {
                     root.addProperty("kind", "spawner")
@@ -530,12 +531,13 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
                 }
                 "container" -> {
                     if (state !is Container) return
-                    state.inventory.contents = decodeItems(root.get("items").asString)
+                    // Must use snapshotInventory before update(); live inventory writes are wiped (Paper #9784).
+                    state.snapshotInventory.contents = decodeItems(root.get("items").asString)
                     state.update(true, applyPhysics)
                 }
                 "lectern" -> {
                     if (state !is Lectern) return
-                    state.inventory.contents = decodeItems(root.get("items").asString)
+                    state.snapshotInventory.contents = decodeItems(root.get("items").asString)
                     if (root.has("page")) {
                         state.page = root.get("page").asInt
                     }

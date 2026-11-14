@@ -2,9 +2,13 @@ package com.sneakyutils.util
 
 import com.sneakyutils.SneakyUtils
 import org.bukkit.Material
+import org.bukkit.block.Container
+import org.bukkit.block.Lectern
+import org.bukkit.inventory.ItemStack
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertSame
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
@@ -487,5 +491,46 @@ class AlteredBlockManagerTest {
         assertEquals(Material.STONE, block.type)
         assertFalse(manager.isTracked(block))
         assertEquals(0, manager.nameIndexedBlockCount)
+    }
+
+    @Test
+    fun temporaryRemovalRestoresLecternBook() {
+        val manager = SneakyUtils.getAlteredBlockManager()
+        val block = world.getBlockAt(4, 64, 4)
+        block.type = Material.LECTERN
+        val lectern = block.state as Lectern
+        lectern.snapshotInventory.setItem(0, ItemStack(Material.WRITTEN_BOOK))
+        lectern.page = 0
+        lectern.update(true, false)
+        assertEquals(Material.WRITTEN_BOOK, (block.state as Lectern).inventory.getItem(0)?.type)
+
+        val change = manager.apply("lectern-test", block, Material.AIR, false)
+        assertEquals(Material.AIR, block.type)
+        change.undo(false)
+
+        assertEquals(Material.LECTERN, block.type)
+        val restored = (block.state as Lectern).inventory.getItem(0)
+        assertNotNull(restored)
+        assertEquals(Material.WRITTEN_BOOK, restored!!.type)
+    }
+
+    @Test
+    fun temporaryRemovalRestoresContainerContents() {
+        val manager = SneakyUtils.getAlteredBlockManager()
+        val block = world.getBlockAt(5, 64, 5)
+        block.type = Material.CHEST
+        val chest = block.state as Container
+        chest.snapshotInventory.setItem(0, ItemStack(Material.DIAMOND, 3))
+        chest.update(true, false)
+
+        val change = manager.apply("chest-test", block, Material.AIR, false)
+        assertEquals(Material.AIR, block.type)
+        change.undo(false)
+
+        assertEquals(Material.CHEST, block.type)
+        val restored = (block.state as Container).inventory.getItem(0)
+        assertNotNull(restored)
+        assertEquals(Material.DIAMOND, restored!!.type)
+        assertEquals(3, restored.amount)
     }
 }

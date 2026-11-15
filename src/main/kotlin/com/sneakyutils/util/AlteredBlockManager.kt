@@ -43,6 +43,14 @@ import java.util.logging.Logger
  * zero/negative values throw [IllegalArgumentException] before registration or mutation.
  * Automatic undo uses the supplied physics flag; explicit undo may override it and cancels the timer.
  * Register each Change instance only once while active, and undo that exact instance.
+ *
+ * Each block keeps every change made to it, oldest first, and one persistent marker holding the
+ * block's original state (the crash fallback). Undoing the newest change writes the state it
+ * replaced. Undoing an older change leaves the world alone and splices it out: the change above it
+ * takes over its restore state, so later undos still end at the original.
+ *
+ * Changes may carry causes (arbitrary strings such as `"explosion"` or `"damage"`), so tools can
+ * find or undo changes by what caused them rather than by which feature made them.
  */
 class AlteredBlockManager(private val plugin: JavaPlugin) {
 
@@ -57,6 +65,9 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
      * Kept in step with [alteredBlocks] for [getByInternalName] and [undoAll].
      */
     private val blocksByName: MutableMap<String, MutableSet<Block>> = HashMap()
+
+    /** Tracked blocks by cause: each block with at least one active change carrying that cause. */
+    private val blocksByCause: MutableMap<String, MutableSet<Block>> = HashMap()
     private val logger: Logger = plugin.logger
     private val blockDataKey = NamespacedKey(plugin, "altered_block_data")
     private val blockStateKey = NamespacedKey(plugin, "altered_block_state")
@@ -65,11 +76,13 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
     private val yKey = NamespacedKey(plugin, "altered_block_y")
     private val zKey = NamespacedKey(plugin, "altered_block_z")
 
+    /** Registers a supplied change on top of the block's existing changes. Does not write to the world. */
     fun add(change: Change) {
         val isNew = !alteredBlocks.containsKey(change.block)
         val alteredBlock = alteredBlocks.computeIfAbsent(change.block) { AlteredBlock(change) }
-        alteredBlock.changes.add(change)
+        alteredBlock.push(change)
         blocksByName.getOrPut(change.internalName) { HashSet() }.add(change.block)
+        for (cause in change.causes) blocksByCause.getOrPut(cause) { HashSet() }.add(change.block)
         if (isNew) {
             indexBlock(change.block)
             alteredBlock.marker = spawnMarker(change.block, change.fromData, change.fromState)
@@ -98,17 +111,30 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
         }
     }
 
-    /** Drops [block] from [internalName]'s entry once none of its remaining changes use that name. */
-    private fun unindexName(internalName: String, block: Block, remaining: List<Change>) {
-        if (remaining.any { it.internalName == internalName }) return
-        val blocks = blocksByName[internalName] ?: return
+    /** Drops the removed [change]'s name and cause entries for its block once no remaining change uses them. */
+    private fun unindexChange(change: Change, remaining: List<Change>) {
+        val block = change.block
+        if (remaining.none { it.internalName == change.internalName }) {
+            unindexKey(blocksByName, change.internalName, block)
+        }
+        for (cause in change.causes) {
+            if (remaining.none { cause in it.causes }) unindexKey(blocksByCause, cause, block)
+        }
+    }
+
+    private fun unindexKey(index: MutableMap<String, MutableSet<Block>>, key: String, block: Block) {
+        val blocks = index[key] ?: return
         blocks.remove(block)
-        if (blocks.isEmpty()) blocksByName.remove(internalName)
+        if (blocks.isEmpty()) index.remove(key)
     }
 
     /** Block entries held by the name index, summed over names; for tests. */
     internal val nameIndexedBlockCount: Int
         get() = blocksByName.values.sumOf { it.size }
+
+    /** Block entries held by the cause index, summed over causes; for tests. */
+    internal val causeIndexedBlockCount: Int
+        get() = blocksByCause.values.sumOf { it.size }
 
     /** Registers a supplied change and undoes it after [durationTicks] ticks with [applyPhysics]. */
     fun add(change: Change, applyPhysics: Boolean, durationTicks: Long) {
@@ -118,34 +144,70 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
     }
 
     /**
-     * Captures the current block, applies [newData], and registers a reversible [Change].
+     * Captures the current block, applies [newData], and registers a reversible [Change]
+     * carrying [causes].
      */
-    fun apply(internalName: String, block: Block, newData: BlockData, applyPhysics: Boolean): Change {
+    @JvmOverloads
+    fun apply(
+        internalName: String, block: Block, newData: BlockData, applyPhysics: Boolean,
+        causes: Set<String> = emptySet(),
+    ): Change {
         val fromData = block.blockData
         val fromState = block.state
         block.setBlockData(newData, applyPhysics)
-        val change = Change(internalName, block, fromData, fromState)
+        val change = Change(internalName, block, fromData, fromState, causes.toSet())
         add(change)
         return change
     }
 
+    /** [apply] with a single [cause]. */
+    fun apply(internalName: String, block: Block, newData: BlockData, applyPhysics: Boolean, cause: String): Change =
+        apply(internalName, block, newData, applyPhysics, setOf(cause))
+
     /**
-     * Captures the current block, applies [material]'s default BlockData, and registers a reversible [Change].
+     * Captures the current block, applies [material]'s default BlockData, and registers a reversible
+     * [Change] carrying [causes].
      */
-    fun apply(internalName: String, block: Block, material: Material, applyPhysics: Boolean): Change =
-        apply(internalName, block, material.createBlockData(), applyPhysics)
+    @JvmOverloads
+    fun apply(
+        internalName: String, block: Block, material: Material, applyPhysics: Boolean,
+        causes: Set<String> = emptySet(),
+    ): Change = apply(internalName, block, material.createBlockData(), applyPhysics, causes)
+
+    /** [apply] with a single [cause]. */
+    fun apply(internalName: String, block: Block, material: Material, applyPhysics: Boolean, cause: String): Change =
+        apply(internalName, block, material.createBlockData(), applyPhysics, setOf(cause))
 
     /** Applies a change and undoes it after [durationTicks] server ticks, using [applyPhysics]. */
-    fun apply(internalName: String, block: Block, material: Material, applyPhysics: Boolean, durationTicks: Long): Change =
-        apply(internalName, block, material.createBlockData(), applyPhysics, durationTicks)
+    @JvmOverloads
+    fun apply(
+        internalName: String, block: Block, material: Material, applyPhysics: Boolean, durationTicks: Long,
+        causes: Set<String> = emptySet(),
+    ): Change = apply(internalName, block, material.createBlockData(), applyPhysics, durationTicks, causes)
+
+    /** Timed [apply] with a single [cause]. */
+    fun apply(
+        internalName: String, block: Block, material: Material, applyPhysics: Boolean, durationTicks: Long,
+        cause: String,
+    ): Change = apply(internalName, block, material.createBlockData(), applyPhysics, durationTicks, setOf(cause))
 
     /** Applies a change and undoes it after [durationTicks] server ticks, using [applyPhysics]. */
-    fun apply(internalName: String, block: Block, newData: BlockData, applyPhysics: Boolean, durationTicks: Long): Change {
+    @JvmOverloads
+    fun apply(
+        internalName: String, block: Block, newData: BlockData, applyPhysics: Boolean, durationTicks: Long,
+        causes: Set<String> = emptySet(),
+    ): Change {
         require(durationTicks > 0) { "durationTicks must be positive" }
-        val change = apply(internalName, block, newData, applyPhysics)
+        val change = apply(internalName, block, newData, applyPhysics, causes)
         scheduleUndo(change, applyPhysics, durationTicks)
         return change
     }
+
+    /** Timed [apply] with a single [cause]. */
+    fun apply(
+        internalName: String, block: Block, newData: BlockData, applyPhysics: Boolean, durationTicks: Long,
+        cause: String,
+    ): Change = apply(internalName, block, newData, applyPhysics, durationTicks, setOf(cause))
 
     private fun scheduleUndo(change: Change, applyPhysics: Boolean, durationTicks: Long) {
         pendingUndos.remove(change)?.cancel()
@@ -160,25 +222,40 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
     }
 
     /**
-     * Registers a reversible [Change] for a block that has already been modified
+     * Registers a reversible [Change] carrying [causes] for a block that has already been modified
      * (e.g. by WorldEdit). Does not write to the world.
      */
-    fun register(internalName: String, block: Block, fromData: BlockData, fromState: BlockState): Change {
-        val change = Change(internalName, block, fromData, fromState)
+    @JvmOverloads
+    fun register(
+        internalName: String, block: Block, fromData: BlockData, fromState: BlockState,
+        causes: Set<String> = emptySet(),
+    ): Change {
+        val change = Change(internalName, block, fromData, fromState, causes.toSet())
         add(change)
         return change
     }
 
+    /** [register] with a single [cause]. */
+    fun register(internalName: String, block: Block, fromData: BlockData, fromState: BlockState, cause: String): Change =
+        register(internalName, block, fromData, fromState, setOf(cause))
+
     /** Registers an external edit and schedules restoration with [applyPhysics] after [durationTicks] ticks. */
+    @JvmOverloads
     fun register(
         internalName: String, block: Block, fromData: BlockData, fromState: BlockState,
-        applyPhysics: Boolean, durationTicks: Long,
+        applyPhysics: Boolean, durationTicks: Long, causes: Set<String> = emptySet(),
     ): Change {
         require(durationTicks > 0) { "durationTicks must be positive" }
-        val change = register(internalName, block, fromData, fromState)
+        val change = register(internalName, block, fromData, fromState, causes)
         scheduleUndo(change, applyPhysics, durationTicks)
         return change
     }
+
+    /** Timed [register] with a single [cause]. */
+    fun register(
+        internalName: String, block: Block, fromData: BlockData, fromState: BlockState,
+        applyPhysics: Boolean, durationTicks: Long, cause: String,
+    ): Change = register(internalName, block, fromData, fromState, applyPhysics, durationTicks, setOf(cause))
 
     /**
      * Undoes every tracked change (called on plugin disable so a reload does not leave blocks
@@ -202,20 +279,35 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
      * Every active change under [internalName], oldest first within each block; blocks in no
      * particular order. Cost grows with the blocks that have such a change, not every tracked block.
      */
-    fun getByInternalName(internalName: String): List<Change> {
+    fun getByInternalName(internalName: String): List<Change> =
+        collectChanges(blocksByName[internalName]) { it.internalName == internalName }
+
+    /** [getByCause] for a single [cause]. */
+    fun getByCause(cause: String): List<Change> = getByCause(setOf(cause))
+
+    /**
+     * Every active change carrying at least one of [causes], oldest first within each block; blocks
+     * in no particular order. Cost grows with the blocks that have such a change.
+     */
+    fun getByCause(causes: Collection<String>): List<Change> {
+        val blocks = LinkedHashSet<Block>()
+        for (cause in causes) blocksByCause[cause]?.let { blocks.addAll(it) }
+        return collectChanges(blocks) { it.hasAnyCause(causes) }
+    }
+
+    private inline fun collectChanges(blocks: Collection<Block>?, filter: (Change) -> Boolean): List<Change> {
         val result = ArrayList<Change>()
-        val blocks = blocksByName[internalName] ?: return result
+        if (blocks == null) return result
         for (block in blocks) {
             val alteredBlock = alteredBlocks[block] ?: continue
             for (change in alteredBlock.changes) {
-                if (change.internalName == internalName) {
-                    result.add(change)
-                }
+                if (filter(change)) result.add(change)
             }
         }
         return result
     }
 
+    /** Every active change on [block], oldest first. */
     fun getByBlock(block: Block): List<Change> {
         val alteredBlock = alteredBlocks[block] ?: return emptyList()
         return ArrayList(alteredBlock.changes)
@@ -233,8 +325,33 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
         world: World, minX: Int, minY: Int, minZ: Int, maxX: Int, maxY: Int, maxZ: Int,
         internalNames: Collection<String>,
     ): List<Block> {
+        if (internalNames.isEmpty()) return ArrayList()
+        return blocksInBox(world, minX, minY, minZ, maxX, maxY, maxZ) { it.internalName in internalNames }
+    }
+
+    /** [getBlocksInBoxByCause] for a single [cause]. */
+    fun getBlocksInBoxByCause(
+        world: World, minX: Int, minY: Int, minZ: Int, maxX: Int, maxY: Int, maxZ: Int,
+        cause: String,
+    ): List<Block> = getBlocksInBoxByCause(world, minX, minY, minZ, maxX, maxY, maxZ, setOf(cause))
+
+    /**
+     * Like [getBlocksInBox], but matches blocks with at least one change carrying one of [causes].
+     */
+    fun getBlocksInBoxByCause(
+        world: World, minX: Int, minY: Int, minZ: Int, maxX: Int, maxY: Int, maxZ: Int,
+        causes: Collection<String>,
+    ): List<Block> {
+        if (causes.isEmpty()) return ArrayList()
+        return blocksInBox(world, minX, minY, minZ, maxX, maxY, maxZ) { it.hasAnyCause(causes) }
+    }
+
+    private fun blocksInBox(
+        world: World, minX: Int, minY: Int, minZ: Int, maxX: Int, maxY: Int, maxZ: Int,
+        matches: (Change) -> Boolean,
+    ): List<Block> {
         val result = ArrayList<Block>()
-        if (internalNames.isEmpty() || minX > maxX || minY > maxY || minZ > maxZ) return result
+        if (minX > maxX || minY > maxY || minZ > maxZ) return result
         val chunks = blocksByChunk[world.uid] ?: return result
         val minCx = minX shr 4
         val maxCx = maxX shr 4
@@ -246,7 +363,7 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
                 if (block.x < minX || block.x > maxX || block.y < minY || block.y > maxY ||
                     block.z < minZ || block.z > maxZ) continue
                 val changes = alteredBlocks[block]?.changes ?: continue
-                if (changes.any { it.internalName in internalNames }) result.add(block)
+                if (changes.any(matches)) result.add(block)
             }
         }
 
@@ -270,22 +387,65 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
 
     fun getByBlockAndInternalName(block: Block, internalName: String): List<Change> {
         val alteredBlock = alteredBlocks[block] ?: return emptyList()
-        val result = ArrayList<Change>()
-        for (change in alteredBlock.changes) {
-            if (change.internalName == internalName) {
-                result.add(change)
-            }
-        }
-        return result
+        return alteredBlock.changes.filter { it.internalName == internalName }
     }
 
     /**
-     * Undoes every change registered under [internalName] (LIFO per block).
+     * Undoes every change registered under [internalName] (newest first per block).
      */
     fun undoAll(internalName: String, applyPhysics: Boolean) {
-        val changes = getByInternalName(internalName)
+        undoNewestFirst(getByInternalName(internalName), applyPhysics)
+    }
+
+    /** [undoAllByCause] for a single [cause]. */
+    fun undoAllByCause(cause: String, applyPhysics: Boolean) {
+        undoAllByCause(setOf(cause), applyPhysics)
+    }
+
+    /**
+     * Undoes every change carrying at least one of [causes] (newest first per block). Changes with
+     * other causes stay in place: where one sits on top, the block keeps showing it, and undoing it
+     * later restores the state from before the undone changes.
+     */
+    fun undoAllByCause(causes: Collection<String>, applyPhysics: Boolean) {
+        undoNewestFirst(getByCause(causes), applyPhysics)
+    }
+
+    private fun undoNewestFirst(changes: List<Change>, applyPhysics: Boolean) {
         for (i in changes.indices.reversed()) {
             changes[i].undo(applyPhysics)
+        }
+    }
+
+    private fun undo(change: Change, applyPhysics: Boolean) {
+        pendingUndos.remove(change)?.cancel()
+        val block = change.block
+        val alteredBlock = alteredBlocks[block] ?: return
+        val index = alteredBlock.indexOf(change)
+        if (index < 0) return
+        val lastIndex = alteredBlock.changes.size - 1
+        if (lastIndex == 0) {
+            restoreBlockState(block, alteredBlock.originalBlockData, alteredBlock.originalBlockState, applyPhysics)
+            removeMarker(alteredBlock)
+            alteredBlocks.remove(block)
+            unindexBlock(block)
+            alteredBlock.removeAt(index)
+        } else if (index == lastIndex) {
+            val (data, state) = alteredBlock.removeAt(index)
+            restoreBlockState(block, data, state, applyPhysics)
+        } else {
+            // An older change: the block keeps showing the newer ones; the change above it now
+            // restores to what this one would have.
+            alteredBlock.removeAt(index)
+        }
+        unindexChange(change, alteredBlock.changes)
+    }
+
+    private fun restoreBlockState(block: Block, blockData: BlockData, blockState: BlockState, applyPhysics: Boolean) {
+        block.setBlockData(blockData, applyPhysics)
+        val tileData = serializeTileData(blockState)
+        if (tileData != null) {
+            applySerializedTileData(block, tileData, applyPhysics)
         }
     }
 
@@ -371,49 +531,67 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
         alteredBlock.marker = null
     }
 
+    /**
+     * One tracked block: its original state (also stored on the marker) and its active changes,
+     * oldest first, each with the state undoing it writes back.
+     */
     class AlteredBlock(change: Change) {
         val originalBlockData: BlockData = change.fromData
         val originalBlockState: BlockState = change.fromState
-        val changes: MutableList<Change> = ArrayList()
+        private val entries: MutableList<Change> = ArrayList()
+        private val restoreTo: MutableList<Pair<BlockData, BlockState>> = ArrayList()
+
+        /** Active changes, oldest first (read-only view). */
+        val changes: List<Change> get() = entries
         var marker: Entity? = null
+
+        internal fun push(change: Change) {
+            entries.add(change)
+            restoreTo.add(change.fromData to change.fromState)
+        }
+
+        internal fun indexOf(change: Change): Int = entries.indexOfFirst { it === change }
+
+        /**
+         * Removes the change at [index] and returns the state it would restore. A change above it
+         * inherits that state, so the stack still unwinds to the original.
+         */
+        internal fun removeAt(index: Int): Pair<BlockData, BlockState> {
+            entries.removeAt(index)
+            val target = restoreTo.removeAt(index)
+            if (index < restoreTo.size) restoreTo[index] = target
+            return target
+        }
     }
 
     /**
-     * Java-compatible record-style accessors (`internalName()`, `block()`, …) via [JvmRecord].
+     * Java-compatible record-style accessors (`internalName()`, `block()`, `causes()`, …) via [JvmRecord].
+     * [fromData]/[fromState] are what the block was when this change was made; [causes] are free-form
+     * labels (e.g. `"explosion"`) for finding or undoing changes by what caused them. Treat the set
+     * as immutable once registered.
      */
     @JvmRecord
-    data class Change(
+    data class Change @JvmOverloads constructor(
         val internalName: String,
         val block: Block,
         val fromData: BlockData,
         val fromState: BlockState,
+        val causes: Set<String> = emptySet(),
     ) {
-        fun undo(applyPhysics: Boolean) {
-            val manager = SneakyUtils.getAlteredBlockManager()
-            manager.pendingUndos.remove(this)?.cancel()
-            val alteredBlock = manager.alteredBlocks[block]
-            val index = alteredBlock?.changes?.indexOfFirst { it === this } ?: -1
-            if (alteredBlock != null && index >= 0) {
-                if (alteredBlock.changes.size == 1) {
-                    restoreBlockState(alteredBlock.originalBlockData, alteredBlock.originalBlockState, applyPhysics)
-                    manager.removeMarker(alteredBlock)
-                    manager.alteredBlocks.remove(block)
-                    manager.unindexBlock(block)
-                    manager.unindexName(internalName, block, emptyList())
-                } else {
-                    restoreBlockState(fromData, fromState, applyPhysics)
-                    alteredBlock.changes.removeAt(index)
-                    manager.unindexName(internalName, block, alteredBlock.changes)
-                }
-            }
-        }
+        /** Change with a single [cause]. */
+        constructor(internalName: String, block: Block, fromData: BlockData, fromState: BlockState, cause: String) :
+            this(internalName, block, fromData, fromState, setOf(cause))
 
-        private fun restoreBlockState(blockData: BlockData, blockState: BlockState, applyPhysics: Boolean) {
-            block.setBlockData(blockData, applyPhysics)
-            val tileData = serializeTileData(blockState)
-            if (tileData != null) {
-                applySerializedTileData(block, tileData, applyPhysics)
-            }
+        fun hasCause(cause: String): Boolean = cause in causes
+
+        fun hasAnyCause(causes: Collection<String>): Boolean = causes.any { it in this.causes }
+
+        /**
+         * Undoes this change. When it is the block's newest change, the block goes back to the state
+         * this change replaced; otherwise the world is left alone and the change is spliced out.
+         */
+        fun undo(applyPhysics: Boolean) {
+            SneakyUtils.getAlteredBlockManager().undo(this, applyPhysics)
         }
     }
 

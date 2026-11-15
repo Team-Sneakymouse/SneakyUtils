@@ -102,10 +102,31 @@ add(Change, boolean applyPhysics, long durationTicks): void
   while active. Record components and existing method signatures are preserved.
 - Timers are in-memory, not persisted countdowns. Persistent marker recovery remains
   unchanged: after a crash, orphan markers restore blocks when their entities load.
-- Overlapping edits retain existing snapshot semantics, **not** a compositing stack.
-  Undo restores that change's captured state (or the original when it is last).
-  An older change expiring first can overwrite a newer edit still tracked on that
-  block. Coordinate overlapping lifetimes/LIFO undo in the consumer when necessary.
+- Several changes on one block are kept separately, oldest first, with one marker
+  holding the block's original state. Undoing the **newest** change writes back the
+  state it replaced. Undoing an **older** change leaves the world alone and splices it
+  out: the change above it takes over its restore state. So an older deadline no longer
+  overwrites a newer edit, and the last undo always lands on the original.
+- After a crash, the marker restores the original state; changes and causes are not persisted.
+
+### Causes
+
+Every `apply` / `register` overload (timed and untimed) also takes a trailing cause,
+either one `String` or a `Set<String>`, recorded on `Change.causes`. Causes are free-form
+labels describing what the change is (`"explosion"`, `"damage"`, …), separate from the
+feature-owned internal name:
+
+```java
+manager.apply("my-plugin:bomb", block, Material.AIR, false, "explosion");
+manager.apply("my-plugin:fire", block, Material.AIR, false, 200L, Set.of("damage", "fire"));
+
+manager.getByCause("explosion");                         // List<Change>
+manager.getBlocksInBoxByCause(world, x1, y1, z1, x2, y2, z2, Set.of("explosion", "damage"));
+manager.undoAllByCause(Set.of("explosion", "damage"), true);
+```
+
+Each lookup and undo accepts one cause or a collection, and matches changes carrying any
+of them. Undoing by cause leaves other changes on the same block in place (see splicing above).
 
 ### Finding tracked blocks near a place
 
@@ -123,7 +144,7 @@ Within each block, `getByInternalName` lists changes oldest first and `undoAll` 
 them newest first; blocks come in no particular order.
 
 Tests cover scheduler deadlines, early/bulk cancellation, stale callbacks, equal
-records, physics flag forwarding, and untimed compatibility with MockBukkit.
+records, physics flag forwarding, splicing, cause lookup/undo, and untimed compatibility with MockBukkit.
 Live Paper checks still needed: actual neighbor physics, tile-state restoration,
 and crash/restart marker recovery; unit tests are not in-game verification.
 

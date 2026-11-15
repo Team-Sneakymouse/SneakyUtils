@@ -488,4 +488,150 @@ class AlteredBlockManagerTest {
         assertFalse(manager.isTracked(block))
         assertEquals(0, manager.nameIndexedBlockCount)
     }
+
+    @Test
+    fun undoingOlderChangeSplicesWithoutTouchingWorld() {
+        val manager = SneakyUtils.getAlteredBlockManager()
+        val block = world.getBlockAt(0, 64, 0)
+        val a = manager.apply("a", block, Material.DIRT, false)
+        val b = manager.apply("b", block, Material.SAND, false)
+        val c = manager.apply("c", block, Material.GLASS, false)
+
+        a.undo(false)
+        assertEquals(Material.GLASS, block.type)
+        assertEquals(listOf(b, c), manager.getByBlock(block))
+
+        c.undo(false)
+        assertEquals(Material.SAND, block.type)
+        b.undo(false)
+        assertEquals(Material.STONE, block.type)
+        assertFalse(manager.isTracked(block))
+        assertTrue(world.entities.none { it.scoreboardTags.contains(SneakyUtils.ALTERED_BLOCK_TAG) })
+    }
+
+    @Test
+    fun middleChangeUndoPassesItsRestoreStateUp() {
+        val manager = SneakyUtils.getAlteredBlockManager()
+        val block = world.getBlockAt(0, 64, 0)
+        manager.apply("a", block, Material.DIRT, false)
+        val b = manager.apply("b", block, Material.SAND, false)
+        val c = manager.apply("c", block, Material.GLASS, false)
+
+        b.undo(false)
+        assertEquals(Material.GLASS, block.type)
+        c.undo(false)
+        // c now restores what b replaced: the dirt from a, not b's sand.
+        assertEquals(Material.DIRT, block.type)
+    }
+
+    @Test
+    fun olderDeadlineNoLongerOverwritesNewerChange() {
+        val manager = SneakyUtils.getAlteredBlockManager()
+        val block = world.getBlockAt(0, 64, 0)
+        manager.apply("older", block, Material.DIRT, false, 2L)
+        manager.apply("newer", block, Material.SAND, false, 4L)
+        server.scheduler.performTicks(2)
+        assertEquals(Material.SAND, block.type)
+        server.scheduler.performTicks(2)
+        assertEquals(Material.STONE, block.type)
+        assertFalse(manager.isTracked(block))
+    }
+
+    @Test
+    fun causesAreRecordedAndLookedUp() {
+        val manager = SneakyUtils.getAlteredBlockManager()
+        val single = manager.apply("bomb", world.getBlockAt(1, 60, 1), Material.AIR, false, "explosion")
+        val multi = manager.apply("fire", world.getBlockAt(2, 60, 2), Material.AIR, false, setOf("damage", "fire"))
+        val none = manager.apply("plain", world.getBlockAt(3, 60, 3), Material.AIR, false)
+        val timed = manager.apply("timed", world.getBlockAt(4, 60, 4), Material.AIR, false, 100L, "explosion")
+
+        assertEquals(setOf("explosion"), single.causes)
+        assertTrue(none.causes.isEmpty())
+        assertEquals(setOf(single, timed), manager.getByCause("explosion").toSet())
+        assertEquals(listOf(multi), manager.getByCause("fire"))
+        assertEquals(setOf(single, multi, timed), manager.getByCause(listOf("explosion", "damage")).toSet())
+        assertTrue(manager.getByCause("missing").isEmpty())
+        assertTrue(manager.getByCause(emptyList()).isEmpty())
+        assertEquals(4, manager.causeIndexedBlockCount)
+    }
+
+    @Test
+    fun registerAndAddCarryCauses() {
+        val manager = SneakyUtils.getAlteredBlockManager()
+        val a = world.getBlockAt(1, 60, 1)
+        val b = world.getBlockAt(2, 60, 2)
+        val reg = manager.register("ext", a, a.blockData, a.state, "explosion")
+        val added = AlteredBlockManager.Change("ext", b, b.blockData, b.state, "explosion")
+        manager.add(added)
+        assertEquals(setOf(reg, added), manager.getByCause("explosion").toSet())
+    }
+
+    @Test
+    fun undoAllByCauseLeavesOtherCausesInPlace() {
+        val manager = SneakyUtils.getAlteredBlockManager()
+        val block = world.getBlockAt(0, 64, 0)
+        val other = world.getBlockAt(1, 64, 0)
+        manager.apply("bomb", block, Material.AIR, false, "explosion")
+        val spell = manager.apply("spell", block, Material.GLASS, false, "spell")
+        manager.apply("bomb", other, Material.AIR, false, "explosion")
+
+        manager.undoAllByCause("explosion", false)
+
+        // The spell block stays; once it goes, the block returns to before the explosion.
+        assertEquals(Material.GLASS, block.type)
+        assertEquals(Material.STONE, other.type)
+        assertEquals(listOf(spell), manager.getByBlock(block))
+        assertTrue(manager.getByCause("explosion").isEmpty())
+        assertEquals(1, manager.causeIndexedBlockCount)
+        spell.undo(false)
+        assertEquals(Material.STONE, block.type)
+        assertEquals(0, manager.causeIndexedBlockCount)
+        assertEquals(0, manager.nameIndexedBlockCount)
+        assertEquals(0, manager.indexedBlockCount)
+    }
+
+    @Test
+    fun undoAllByCauseSetMatchesAnyCause() {
+        val manager = SneakyUtils.getAlteredBlockManager()
+        val a = world.getBlockAt(1, 64, 0)
+        val b = world.getBlockAt(2, 64, 0)
+        val c = world.getBlockAt(3, 64, 0)
+        manager.apply("x", a, Material.AIR, false, "explosion")
+        manager.apply("x", b, Material.AIR, false, setOf("damage", "fire"))
+        manager.apply("x", c, Material.AIR, false, "other")
+
+        manager.undoAllByCause(setOf("explosion", "damage"), false)
+
+        assertEquals(Material.STONE, a.type)
+        assertEquals(Material.STONE, b.type)
+        assertEquals(Material.AIR, c.type)
+        assertEquals(1, manager.causeIndexedBlockCount)
+    }
+
+    @Test
+    fun causeIndexKeepsBlockWhileAnotherChangeHasCause() {
+        val manager = SneakyUtils.getAlteredBlockManager()
+        val block = world.getBlockAt(0, 64, 0)
+        val first = manager.apply("a", block, Material.DIRT, false, setOf("damage", "explosion"))
+        val second = manager.apply("b", block, Material.SAND, false, "damage")
+
+        first.undo(false)
+        assertEquals(listOf(second), manager.getByCause("damage"))
+        assertTrue(manager.getByCause("explosion").isEmpty())
+        assertEquals(1, manager.causeIndexedBlockCount)
+    }
+
+    @Test
+    fun boxQueryByCause() {
+        val manager = SneakyUtils.getAlteredBlockManager()
+        manager.apply("x", world.getBlockAt(1, 60, 1), Material.AIR, false, "explosion")
+        manager.apply("x", world.getBlockAt(2, 60, 2), Material.AIR, false, "fire")
+        manager.apply("x", world.getBlockAt(40, 60, 40), Material.AIR, false, "explosion")
+
+        fun found(causes: Collection<String>) =
+            manager.getBlocksInBoxByCause(world, 0, 0, 0, 5, 100, 5, causes).map { it.x }.toSet()
+        assertEquals(setOf(1), manager.getBlocksInBoxByCause(world, 0, 0, 0, 5, 100, 5, "explosion").map { it.x }.toSet())
+        assertEquals(setOf(1, 2), found(listOf("explosion", "fire")))
+        assertTrue(found(emptyList()).isEmpty())
+    }
 }

@@ -134,6 +134,10 @@ manager.getBlocksInBoxByCause(world, x1, y1, z1, x2, y2, z2, Set.of("explosion",
 manager.undoAllByCause("damage", true);
 ```
 
+For one block, `undoByCause(block, causes, physics)` undoes its matching changes and
+`previewUndoByCause(block, causes)` returns the BlockData it would show afterwards (null when
+nothing matches), for repair tools that animate the result before writing it.
+
 Each lookup and undo accepts one cause or a collection, and matches changes carrying any
 of them (following the implications above). Undoing by cause leaves other changes on the
 same block in place (see splicing above).

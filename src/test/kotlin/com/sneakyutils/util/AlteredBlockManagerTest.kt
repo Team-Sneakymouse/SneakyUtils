@@ -675,4 +675,63 @@ class AlteredBlockManagerTest {
         assertThrows(IllegalArgumentException::class.java) { manager.getByCause("boom") }
         assertThrows(IllegalArgumentException::class.java) { manager.undoAllByCause(setOf("boom"), false) }
     }
+
+    @Test
+    fun undoByCauseOnOneBlockLeavesOthersAlone() {
+        val manager = SneakyUtils.getAlteredBlockManager()
+        val block = world.getBlockAt(0, 64, 0)
+        val other = world.getBlockAt(1, 64, 0)
+        manager.apply("bomb", block, Material.AIR, false, "explosion")
+        val deco = manager.apply("lights", block, Material.GLOWSTONE, false, "decoration")
+        manager.apply("bomb", other, Material.AIR, false, "explosion")
+
+        assertTrue(manager.undoByCause(block, "damage", false))
+        assertEquals(Material.GLOWSTONE, block.type)
+        assertEquals(listOf(deco), manager.getByBlock(block))
+        assertEquals(Material.AIR, other.type)
+        assertFalse(manager.undoByCause(block, "damage", false))
+        assertFalse(manager.undoByCause(world.getBlockAt(5, 64, 5), "damage", false))
+    }
+
+    @Test
+    fun previewUndoByCauseMatchesWhatUndoWrites() {
+        val manager = SneakyUtils.getAlteredBlockManager()
+        fun check(block: org.bukkit.block.Block, causes: Set<String>) {
+            val preview = manager.previewUndoByCause(block, causes)
+            val before = block.blockData
+            val undone = manager.undoByCause(block, causes, false)
+            if (preview == null) {
+                assertFalse(undone)
+                assertEquals(before, block.blockData)
+            } else {
+                assertEquals(preview, block.blockData)
+            }
+        }
+        // All matching: back to the original.
+        val a = world.getBlockAt(0, 64, 0)
+        manager.apply("x", a, Material.DIRT, false, "damage")
+        manager.apply("x", a, Material.SAND, false, "explosion")
+        assertEquals(Material.STONE, manager.previewUndoByCause(a, "damage")!!.material)
+        check(a, setOf("damage"))
+
+        // Newest kept: the block does not change.
+        val b = world.getBlockAt(1, 64, 0)
+        manager.apply("x", b, Material.DIRT, false, "damage")
+        manager.apply("x", b, Material.GLOWSTONE, false, "decoration")
+        assertEquals(Material.GLOWSTONE, manager.previewUndoByCause(b, "damage")!!.material)
+        check(b, setOf("damage"))
+
+        // Kept change under matching ones, after an earlier splice: the state after the kept change.
+        val c = world.getBlockAt(2, 64, 0)
+        manager.apply("x", c, Material.GLOWSTONE, false, "decoration")
+        val spliced = manager.apply("x", c, Material.DIRT, false, "decoration")
+        manager.apply("x", c, Material.SAND, false, "fire")
+        spliced.undo(false)
+        assertEquals(Material.GLOWSTONE, manager.previewUndoByCause(c, "damage")!!.material)
+        check(c, setOf("damage"))
+
+        // Nothing matching.
+        assertEquals(null, manager.previewUndoByCause(c, "explosion"))
+        check(c, setOf("explosion"))
+    }
 }

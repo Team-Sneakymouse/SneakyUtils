@@ -417,6 +417,43 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
         undoNewestFirst(getByCause(causes), applyPhysics)
     }
 
+    /** [undoByCause] for a single [cause]. */
+    fun undoByCause(block: Block, cause: String, applyPhysics: Boolean): Boolean =
+        undoByCause(block, setOf(cause), applyPhysics)
+
+    /**
+     * Undoes every change on [block] matching one of [causes] (newest first), leaving its other
+     * changes in place. True if anything was undone. Throws [IllegalArgumentException] on an unknown cause.
+     */
+    fun undoByCause(block: Block, causes: Collection<String>, applyPhysics: Boolean): Boolean {
+        val matching = AlteredBlockCauses.matching(causes)
+        val changes = alteredBlocks[block]?.changes?.filter { change -> change.causes.any { it in matching } }
+        if (changes.isNullOrEmpty()) return false
+        undoNewestFirst(changes, applyPhysics)
+        return true
+    }
+
+    /** [previewUndoByCause] for a single [cause]. */
+    fun previewUndoByCause(block: Block, cause: String): BlockData? = previewUndoByCause(block, setOf(cause))
+
+    /**
+     * The BlockData [block] would show after [undoByCause] with [causes], without changing anything;
+     * null when no change on it matches. When a non-matching change is newest, that is the block's
+     * current data. Throws [IllegalArgumentException] on an unknown cause.
+     */
+    fun previewUndoByCause(block: Block, causes: Collection<String>): BlockData? {
+        val matching = AlteredBlockCauses.matching(causes)
+        val alteredBlock = alteredBlocks[block] ?: return null
+        val changes = alteredBlock.changes
+        if (changes.none { change -> change.causes.any { it in matching } }) return null
+        val keptTop = changes.indexOfLast { change -> change.causes.none { it in matching } }
+        return when (keptTop) {
+            -1 -> alteredBlock.originalBlockData.clone()
+            changes.size - 1 -> block.blockData
+            else -> alteredBlock.restoreDataAt(keptTop + 1).clone()
+        }
+    }
+
     private fun undoNewestFirst(changes: List<Change>, applyPhysics: Boolean) {
         for (i in changes.indices.reversed()) {
             changes[i].undo(applyPhysics)
@@ -557,6 +594,9 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
         }
 
         internal fun indexOf(change: Change): Int = entries.indexOfFirst { it === change }
+
+        /** The BlockData undoing the change at [index] writes back if it is the newest change. */
+        internal fun restoreDataAt(index: Int): BlockData = restoreTo[index].first
 
         /**
          * Removes the change at [index] and returns the state it would restore. A change above it

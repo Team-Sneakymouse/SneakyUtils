@@ -550,7 +550,7 @@ class AlteredBlockManagerTest {
         assertEquals(setOf(single, timed), manager.getByCause("explosion").toSet())
         assertEquals(listOf(multi), manager.getByCause("fire"))
         assertEquals(setOf(single, multi, timed), manager.getByCause(listOf("explosion", "damage")).toSet())
-        assertTrue(manager.getByCause("missing").isEmpty())
+        assertTrue(manager.getByCause("decoration").isEmpty())
         assertTrue(manager.getByCause(emptyList()).isEmpty())
         assertEquals(4, manager.causeIndexedBlockCount)
     }
@@ -572,7 +572,7 @@ class AlteredBlockManagerTest {
         val block = world.getBlockAt(0, 64, 0)
         val other = world.getBlockAt(1, 64, 0)
         manager.apply("bomb", block, Material.AIR, false, "explosion")
-        val spell = manager.apply("spell", block, Material.GLASS, false, "spell")
+        val spell = manager.apply("spell", block, Material.GLASS, false, "decoration")
         manager.apply("bomb", other, Material.AIR, false, "explosion")
 
         manager.undoAllByCause("explosion", false)
@@ -598,7 +598,7 @@ class AlteredBlockManagerTest {
         val c = world.getBlockAt(3, 64, 0)
         manager.apply("x", a, Material.AIR, false, "explosion")
         manager.apply("x", b, Material.AIR, false, setOf("damage", "fire"))
-        manager.apply("x", c, Material.AIR, false, "other")
+        manager.apply("x", c, Material.AIR, false, "decoration")
 
         manager.undoAllByCause(setOf("explosion", "damage"), false)
 
@@ -626,12 +626,53 @@ class AlteredBlockManagerTest {
         val manager = SneakyUtils.getAlteredBlockManager()
         manager.apply("x", world.getBlockAt(1, 60, 1), Material.AIR, false, "explosion")
         manager.apply("x", world.getBlockAt(2, 60, 2), Material.AIR, false, "fire")
+        manager.apply("x", world.getBlockAt(3, 60, 3), Material.AIR, false, "decoration")
         manager.apply("x", world.getBlockAt(40, 60, 40), Material.AIR, false, "explosion")
 
         fun found(causes: Collection<String>) =
             manager.getBlocksInBoxByCause(world, 0, 0, 0, 5, 100, 5, causes).map { it.x }.toSet()
         assertEquals(setOf(1), manager.getBlocksInBoxByCause(world, 0, 0, 0, 5, 100, 5, "explosion").map { it.x }.toSet())
         assertEquals(setOf(1, 2), found(listOf("explosion", "fire")))
+        assertEquals(setOf(1, 2), found(listOf("damage")))
+        assertEquals(setOf(3), found(listOf("decoration")))
         assertTrue(found(emptyList()).isEmpty())
+    }
+
+    @Test
+    fun damageMatchesExplosionAndFireButNotDecoration() {
+        val manager = SneakyUtils.getAlteredBlockManager()
+        val boom = manager.apply("x", world.getBlockAt(1, 60, 1), Material.AIR, false, AlteredBlockCauses.EXPLOSION)
+        val burn = manager.apply("x", world.getBlockAt(2, 60, 2), Material.FIRE, false, AlteredBlockCauses.FIRE)
+        val smash = manager.apply("x", world.getBlockAt(3, 60, 3), Material.AIR, false, AlteredBlockCauses.DAMAGE)
+        val deco = manager.apply("x", world.getBlockAt(4, 60, 4), Material.GLASS, false, AlteredBlockCauses.DECORATION)
+
+        assertEquals(setOf(boom, burn, smash), manager.getByCause("damage").toSet())
+        assertEquals(listOf(boom), manager.getByCause("explosion"))
+        assertEquals(listOf(deco), manager.getByCause("decoration"))
+        assertTrue(boom.hasCause("damage"))
+        assertFalse(smash.hasCause("explosion"))
+        assertFalse(deco.hasCause("damage"))
+
+        manager.undoAllByCause("damage", false)
+        assertEquals(listOf(deco), manager.getByCause("decoration"))
+        assertTrue(manager.getByCause("damage").isEmpty())
+    }
+
+    @Test
+    fun unknownCausesAreRejectedBeforeMutation() {
+        val manager = SneakyUtils.getAlteredBlockManager()
+        val block = world.getBlockAt(0, 64, 0)
+        assertThrows(IllegalArgumentException::class.java) { manager.apply("x", block, Material.AIR, false, "boom") }
+        assertThrows(IllegalArgumentException::class.java) {
+            manager.apply("x", block, Material.AIR, false, 20L, setOf("damage", "Damage"))
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            AlteredBlockManager.Change("x", block, block.blockData, block.state, "boom")
+        }
+        assertEquals(Material.STONE, block.type)
+        assertFalse(manager.isTracked(block))
+        assertTrue(server.scheduler.pendingTasks.none { it.owner === plugin })
+        assertThrows(IllegalArgumentException::class.java) { manager.getByCause("boom") }
+        assertThrows(IllegalArgumentException::class.java) { manager.undoAllByCause(setOf("boom"), false) }
     }
 }

@@ -7,7 +7,7 @@ This is a live Paper plugin (not a compile-only library). Install the JAR on the
 ## What’s included (v1)
 
 - `TextUtility` — Unicode escape decoding (`\uXXXX` / `\UXXXXXXXX`), legacy `&`/`§` → MiniMessage → Adventure `Component`, plus balanced line wrapping
-- `AlteredBlockManager` — reversible temporary block changes with persistent Marker fallback (scoreboard tag `sneakyutils_altered_block`, PDC keys under `sneakyutils:`)
+- `AlteredBlockManager` — reversible temporary block changes with persistent Marker fallback (scoreboard tag `sneakyutils_altered_block`, PDC keys under `sneakyutils:`); changes can carry causes from the fixed `AlteredBlockCauses` set
 - MagicsSpells-ported static helpers under `com.sneakyutils.util`: location/XP/color/params, `BlockUtils`, `EntityPdc` (injectable namespace), attribute/particle/sound/potion name resolution, geometry (`BoundingBox` / `bounds`), `AtomicFiles`, and small Bukkit/stdlib helpers
 - `PlayerUtil` — SCM noformat character names via optional PAPI, CMI-aware target eligibility, dispatch on-duty checks, and Bukkit account-name lookups
 - `PlayerUtil.conceal(owner, player)` / `reveal(owner, player)` / `isConcealed(player)` (`PlayerConcealment`) — hide a player from everyone, themselves included, without spectator mode or `hidePlayer`. Concealing a player:
@@ -112,21 +112,31 @@ add(Change, boolean applyPhysics, long durationTicks): void
 ### Causes
 
 Every `apply` / `register` overload (timed and untimed) also takes a trailing cause,
-either one `String` or a `Set<String>`, recorded on `Change.causes`. Causes are free-form
-labels describing what the change is (`"explosion"`, `"damage"`, …), separate from the
-feature-owned internal name:
+either one `String` or a `Set<String>`, recorded on `Change.causes`. A cause says what the
+change is, separate from the feature-owned internal name. Causes come from the fixed set in
+`AlteredBlockCauses`; any other string throws `IllegalArgumentException` before the world is touched:
+
+| Cause | Meaning | Also matches lookups for |
+|-------|---------|--------------------------|
+| `damage` | blocks broken, removed or spoiled (smashed windows, holes, cobwebs, graffiti) | — |
+| `explosion` | damage from an explosion | `damage` |
+| `fire` | damage from fire, including placed fire | `damage` |
+| `decoration` | temporary decoration that is not damage | — |
+
+Give a change its most specific cause only: `explosion`, not `explosion` and `damage`.
 
 ```java
-manager.apply("my-plugin:bomb", block, Material.AIR, false, "explosion");
-manager.apply("my-plugin:fire", block, Material.AIR, false, 200L, Set.of("damage", "fire"));
+manager.apply("my-plugin:bomb", block, Material.AIR, false, AlteredBlockCauses.EXPLOSION);
+manager.apply("my-plugin:lights", block, Material.GLOWSTONE, false, 200L, AlteredBlockCauses.DECORATION);
 
-manager.getByCause("explosion");                         // List<Change>
-manager.getBlocksInBoxByCause(world, x1, y1, z1, x2, y2, z2, Set.of("explosion", "damage"));
-manager.undoAllByCause(Set.of("explosion", "damage"), true);
+manager.getByCause("damage");                            // damage, explosion and fire changes
+manager.getBlocksInBoxByCause(world, x1, y1, z1, x2, y2, z2, Set.of("explosion", "fire"));
+manager.undoAllByCause("damage", true);
 ```
 
 Each lookup and undo accepts one cause or a collection, and matches changes carrying any
-of them. Undoing by cause leaves other changes on the same block in place (see splicing above).
+of them (following the implications above). Undoing by cause leaves other changes on the
+same block in place (see splicing above).
 
 ### Finding tracked blocks near a place
 

@@ -49,8 +49,9 @@ import java.util.logging.Logger
  * replaced. Undoing an older change leaves the world alone and splices it out: the change above it
  * takes over its restore state, so later undos still end at the original.
  *
- * Changes may carry causes (arbitrary strings such as `"explosion"` or `"damage"`), so tools can
- * find or undo changes by what caused them rather than by which feature made them.
+ * Changes may carry causes from the fixed set in [AlteredBlockCauses] (such as `"explosion"`), so
+ * tools can find or undo changes by what caused them rather than by which feature made them.
+ * Cause lookups follow its implications: looking up `"damage"` also finds `"explosion"` and `"fire"`.
  */
 class AlteredBlockManager(private val plugin: JavaPlugin) {
 
@@ -152,6 +153,7 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
         internalName: String, block: Block, newData: BlockData, applyPhysics: Boolean,
         causes: Set<String> = emptySet(),
     ): Change {
+        AlteredBlockCauses.requireValid(causes)
         val fromData = block.blockData
         val fromState = block.state
         block.setBlockData(newData, applyPhysics)
@@ -286,13 +288,15 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
     fun getByCause(cause: String): List<Change> = getByCause(setOf(cause))
 
     /**
-     * Every active change carrying at least one of [causes], oldest first within each block; blocks
-     * in no particular order. Cost grows with the blocks that have such a change.
+     * Every active change matching at least one of [causes] (see [AlteredBlockCauses]), oldest first
+     * within each block; blocks in no particular order. Cost grows with the blocks that have such a
+     * change. Throws [IllegalArgumentException] on an unknown cause.
      */
     fun getByCause(causes: Collection<String>): List<Change> {
+        val matching = AlteredBlockCauses.matching(causes)
         val blocks = LinkedHashSet<Block>()
-        for (cause in causes) blocksByCause[cause]?.let { blocks.addAll(it) }
-        return collectChanges(blocks) { it.hasAnyCause(causes) }
+        for (cause in matching) blocksByCause[cause]?.let { blocks.addAll(it) }
+        return collectChanges(blocks) { change -> change.causes.any { it in matching } }
     }
 
     private inline fun collectChanges(blocks: Collection<Block>?, filter: (Change) -> Boolean): List<Change> {
@@ -336,14 +340,16 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
     ): List<Block> = getBlocksInBoxByCause(world, minX, minY, minZ, maxX, maxY, maxZ, setOf(cause))
 
     /**
-     * Like [getBlocksInBox], but matches blocks with at least one change carrying one of [causes].
+     * Like [getBlocksInBox], but matches blocks with at least one change matching one of [causes]
+     * (see [AlteredBlockCauses]). Throws [IllegalArgumentException] on an unknown cause.
      */
     fun getBlocksInBoxByCause(
         world: World, minX: Int, minY: Int, minZ: Int, maxX: Int, maxY: Int, maxZ: Int,
         causes: Collection<String>,
     ): List<Block> {
-        if (causes.isEmpty()) return ArrayList()
-        return blocksInBox(world, minX, minY, minZ, maxX, maxY, maxZ) { it.hasAnyCause(causes) }
+        val matching = AlteredBlockCauses.matching(causes)
+        if (matching.isEmpty()) return ArrayList()
+        return blocksInBox(world, minX, minY, minZ, maxX, maxY, maxZ) { change -> change.causes.any { it in matching } }
     }
 
     private fun blocksInBox(
@@ -403,12 +409,49 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
     }
 
     /**
-     * Undoes every change carrying at least one of [causes] (newest first per block). Changes with
+     * Undoes every change matching at least one of [causes] (newest first per block). Changes with
      * other causes stay in place: where one sits on top, the block keeps showing it, and undoing it
      * later restores the state from before the undone changes.
      */
     fun undoAllByCause(causes: Collection<String>, applyPhysics: Boolean) {
         undoNewestFirst(getByCause(causes), applyPhysics)
+    }
+
+    /** [undoByCause] for a single [cause]. */
+    fun undoByCause(block: Block, cause: String, applyPhysics: Boolean): Boolean =
+        undoByCause(block, setOf(cause), applyPhysics)
+
+    /**
+     * Undoes every change on [block] matching one of [causes] (newest first), leaving its other
+     * changes in place. True if anything was undone. Throws [IllegalArgumentException] on an unknown cause.
+     */
+    fun undoByCause(block: Block, causes: Collection<String>, applyPhysics: Boolean): Boolean {
+        val matching = AlteredBlockCauses.matching(causes)
+        val changes = alteredBlocks[block]?.changes?.filter { change -> change.causes.any { it in matching } }
+        if (changes.isNullOrEmpty()) return false
+        undoNewestFirst(changes, applyPhysics)
+        return true
+    }
+
+    /** [previewUndoByCause] for a single [cause]. */
+    fun previewUndoByCause(block: Block, cause: String): BlockData? = previewUndoByCause(block, setOf(cause))
+
+    /**
+     * The BlockData [block] would show after [undoByCause] with [causes], without changing anything;
+     * null when no change on it matches. When a non-matching change is newest, that is the block's
+     * current data. Throws [IllegalArgumentException] on an unknown cause.
+     */
+    fun previewUndoByCause(block: Block, causes: Collection<String>): BlockData? {
+        val matching = AlteredBlockCauses.matching(causes)
+        val alteredBlock = alteredBlocks[block] ?: return null
+        val changes = alteredBlock.changes
+        if (changes.none { change -> change.causes.any { it in matching } }) return null
+        val keptTop = changes.indexOfLast { change -> change.causes.none { it in matching } }
+        return when (keptTop) {
+            -1 -> alteredBlock.originalBlockData.clone()
+            changes.size - 1 -> block.blockData
+            else -> alteredBlock.restoreDataAt(keptTop + 1).clone()
+        }
     }
 
     private fun undoNewestFirst(changes: List<Change>, applyPhysics: Boolean) {
@@ -552,6 +595,9 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
 
         internal fun indexOf(change: Change): Int = entries.indexOfFirst { it === change }
 
+        /** The BlockData undoing the change at [index] writes back if it is the newest change. */
+        internal fun restoreDataAt(index: Int): BlockData = restoreTo[index].first
+
         /**
          * Removes the change at [index] and returns the state it would restore. A change above it
          * inherits that state, so the stack still unwinds to the original.
@@ -566,9 +612,9 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
 
     /**
      * Java-compatible record-style accessors (`internalName()`, `block()`, `causes()`, …) via [JvmRecord].
-     * [fromData]/[fromState] are what the block was when this change was made; [causes] are free-form
-     * labels (e.g. `"explosion"`) for finding or undoing changes by what caused them. Treat the set
-     * as immutable once registered.
+     * [fromData]/[fromState] are what the block was when this change was made; [causes] say what
+     * caused it, from [AlteredBlockCauses] (any other string throws [IllegalArgumentException]).
+     * Treat the set as immutable once registered.
      */
     @JvmRecord
     data class Change @JvmOverloads constructor(
@@ -578,13 +624,22 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
         val fromState: BlockState,
         val causes: Set<String> = emptySet(),
     ) {
+        init {
+            AlteredBlockCauses.requireValid(causes)
+        }
+
         /** Change with a single [cause]. */
         constructor(internalName: String, block: Block, fromData: BlockData, fromState: BlockState, cause: String) :
             this(internalName, block, fromData, fromState, setOf(cause))
 
-        fun hasCause(cause: String): Boolean = cause in causes
+        /** Whether this change matches [cause], following [AlteredBlockCauses]' implications. */
+        fun hasCause(cause: String): Boolean = hasAnyCause(setOf(cause))
 
-        fun hasAnyCause(causes: Collection<String>): Boolean = causes.any { it in this.causes }
+        /** Whether this change matches any of [causes], following [AlteredBlockCauses]' implications. */
+        fun hasAnyCause(causes: Collection<String>): Boolean {
+            val matching = AlteredBlockCauses.matching(causes)
+            return this.causes.any { it in matching }
+        }
 
         /**
          * Undoes this change. When it is the block's newest change, the block goes back to the state

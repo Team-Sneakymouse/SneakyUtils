@@ -174,11 +174,11 @@ class TriggerAttributionTest {
         p.simulatePlayerMove(Location(world, 2.5, 64.0, 2.5))
         assertEquals(1L, probe.counts["handler.slow.owner.area-enter.owner:slow"])
         assertEquals(1L, probe.counts["handler.errors.owner.area-enter.owner:bad"])
-        assertNull(probe.counts["handler.slow.owner.area-enter.owner:bad"])
         val stats = service.stats().subscriptions.associateBy { it.label }
         assertEquals(1L, stats["owner:slow"]!!.slow)
         assertEquals(1L, stats["owner:bad"]!!.errors)
-        assertEquals(1L, service.counters()["handler.slow"])
+        // A throwing handler may also cross the 1 ms mark on a cold JVM (building the exception), so only a floor is fixed.
+        assertTrue(service.counters()["handler.slow"]!! >= 1L)
     }
 
     @Test

@@ -20,6 +20,9 @@ interface Subscription : AutoCloseable {
     /** False once closed, by [close], owner disable or SneakyUtils disable. */
     val active: Boolean
 
+    /** The diagnostics label it was made with (its options' label, or a [Triggers.labelled] view's), or null. */
+    val label: String? get() = null
+
     override fun close()
 }
 

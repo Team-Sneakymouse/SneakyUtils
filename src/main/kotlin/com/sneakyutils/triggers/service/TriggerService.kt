@@ -25,6 +25,7 @@ import com.sneakyutils.triggers.StepHandler
 import com.sneakyutils.triggers.Subscription
 import com.sneakyutils.triggers.SubscriptionStats
 import com.sneakyutils.triggers.TableLoadResult
+import com.sneakyutils.triggers.TimerOptions
 import com.sneakyutils.triggers.TriggerStats
 import com.sneakyutils.triggers.Triggers
 import com.sneakyutils.triggers.WatchOptions
@@ -32,6 +33,7 @@ import com.sneakyutils.triggers.engine.AreaIndex
 import com.sneakyutils.triggers.engine.AreaReg
 import com.sneakyutils.triggers.engine.BucketBalancer
 import com.sneakyutils.triggers.engine.EngineSink
+import com.sneakyutils.triggers.engine.EventQueue
 import com.sneakyutils.triggers.engine.Geometry
 import com.sneakyutils.triggers.engine.MovementCore
 import com.sneakyutils.triggers.engine.PlayerState
@@ -88,22 +90,62 @@ internal class TriggerService(
     /** Nanoseconds spent in the mounted poll while timing is on (its call count is `polls.mounted`). */
     @JvmField var pollNanos = 0L
 
+    /** Handler calls of [SLOW_HANDLER_NANOS] or more while timing was on. */
+    @JvmField var slowCalls = 0L
+
     /** Measure handler time (a SneakyDiagnostics capture or `/triggers profile on`). See [refreshTiming]. */
     @JvmField var timing = false
 
+    /** Whether a SneakyDiagnostics capture was running at the last [refreshTiming]. */
+    @JvmField var recording = false
+
     /** Set by `/triggers profile on|off`: time handlers with System.nanoTime without a capture. */
     @JvmField var profileOn = false
+
+    /** Section and count names for captures (handler attribution). */
+    @JvmField val diag = TriggerDiagnostics(probe)
+
+    /** Engine stages open on the stack ([stage]): bit per stage, so a stage never nests inside itself. */
+    @JvmField var openStages = 0
 
     private var sampler: BukkitTask? = null
     private var sampling = false
     private var sampleBaseline: Map<String, Long> = emptyMap()
 
     /**
-     * Timing is on while profiling or while a SneakyDiagnostics capture runs. Read once per drain, tick or matched
-     * click (one interface call), never on the no-op path.
+     * Timing is on while profiling or while a SneakyDiagnostics capture runs. Read once per drain, tick, matched click,
+     * riding or resync pass and sample (one interface call), never per handler and never on the no-op path. A capture
+     * that starts begins a new set of diagnostics names ([TriggerDiagnostics.newCapture]).
      */
     fun refreshTiming() {
-        timing = profileOn || (probe?.on() == true)
+        val pr = probe
+        val on = pr != null && pr.on()
+        if (on != recording) {
+            recording = on
+            if (on) diag.newCapture()
+        }
+        timing = profileOn || on
+    }
+
+    /**
+     * Runs [block] as engine stage [name] (a SneakyDiagnostics section) while timing is on; otherwise just runs it
+     * (one field read). A stage already open further up the stack isn't opened again (a teleport from a teleport
+     * handler stays inside the outer `teleport`), so sections nest strictly and never inside their own name.
+     */
+    inline fun stage(bit: Int, name: String, block: () -> Unit) {
+        val pr = probe
+        if (!timing || pr == null || (openStages and bit) != 0) {
+            block()
+            return
+        }
+        val token = pr.start()
+        openStages = openStages or bit
+        try {
+            block()
+        } finally {
+            openStages = openStages and bit.inv()
+            if (token != 0L) pr.end(name, token)
+        }
     }
 
     // Timers: arrays replaced on change (copy-on-write), so a tick iterates a snapshot.
@@ -130,10 +172,24 @@ internal class TriggerService(
         plugin.server.pluginManager.registerEvents(l, plugin)
         // Players already online (plugin enabled late, or a reload).
         for (p in plugin.server.onlinePlayers) playerJoined(p)
-        // Counters and levels for SneakyDiagnostics captures, once a second; only when it is installed.
-        if (probe != null && plugin.server.pluginManager.getPlugin("SneakyDiagnostics") != null) {
-            sampler = plugin.server.scheduler.runTaskTimer(plugin, Runnable { sample() }, 20L, 20L)
-        }
+        // Counters and levels for SneakyDiagnostics captures, once a second; only when it is installed (or its service
+        // appears later: diagnosticsChanged).
+        if (plugin.server.pluginManager.getPlugin("SneakyDiagnostics") != null) startSampler()
+    }
+
+    private fun startSampler() {
+        if (probe == null || sampler != null || !running) return
+        sampler = plugin.server.scheduler.runTaskTimer(plugin, Runnable { sample() }, 20L, 20L)
+    }
+
+    /**
+     * SneakyDiagnostics' service was registered or unregistered (the listener calls this at MONITOR, after the shim
+     * attached or dropped its probe). A service that appears after startup gets the sampler; either way timing is
+     * re-read, so a stale "capture running" never outlives the service.
+     */
+    fun diagnosticsChanged(registered: Boolean) {
+        if (registered) startSampler()
+        refreshTiming()
     }
 
     /**
@@ -142,7 +198,8 @@ internal class TriggerService(
      */
     private fun sample() {
         val pr = probe ?: return
-        if (!pr.on()) {
+        refreshTiming()
+        if (!recording) {
             sampling = false
             return
         }
@@ -164,7 +221,35 @@ internal class TriggerService(
             pr.level("timers.per-player", playerTimers.size.toLong())
             pr.level("timers.all-online", playerTimers.count { it.scope == PlayerScope.ALL_ONLINE }.toLong())
             pr.level("subscriptions", byOwner.values.sumOf { it.size }.toLong())
+            pr.level("players.watched", core.watchedPlayerCount.toLong())
+            pr.level("timers.per-player.players", playerTimers.sumOf { it.sizeInternal }.toLong())
+            sampleSubscriptionLevels(pr)
         }
+    }
+
+    /**
+     * Levels `subscriptions.by-kind.<kind>` and `subscriptions.by-owner.<owner>.<kind>`: the first
+     * [TriggerDiagnostics.OWNER_LEVELS] owner/kind pairs of the capture by name, the rest summed in
+     * `subscriptions.by-owner.other`. Every pair seen in the capture is reported each second, as 0 when it has none.
+     */
+    private fun sampleSubscriptionLevels(pr: Probe) {
+        val kinds = java.util.TreeMap<String, Long>()
+        val owners = diag.ownerLevels
+        for (key in owners.keys) owners[key] = 0L
+        var other = 0L
+        for (set in byOwner.values) {
+            for (sub in set) {
+                kinds.merge(sub.kind, 1L, Long::plus)
+                val key = "subscriptions.by-owner.${sub.ownerKey}.${sub.kind}"
+                val n = owners[key]
+                if (n != null) owners[key] = n + 1
+                else if (owners.size < TriggerDiagnostics.OWNER_LEVELS) owners[key] = 1L
+                else other++
+            }
+        }
+        for (kind in KINDS) pr.level("subscriptions.by-kind.$kind", kinds[kind] ?: 0L)
+        for ((key, n) in owners) pr.level(key, n)
+        if (other > 0 || owners.size >= TriggerDiagnostics.OWNER_LEVELS) pr.level("subscriptions.by-owner.other", other)
     }
 
     /**
@@ -235,15 +320,20 @@ internal class TriggerService(
 
     // ---------------------------------------------------------------- Bukkit inputs (from the listener and ticker)
 
-    fun playerJoined(p: Player) {
+    fun playerJoined(p: Player) = stage(STAGE_PLAYER, "player-state") {
         val loc = p.location
-        val world = loc.world ?: return
+        val world = loc.world ?: return@stage
         val riding = p.isInsideVehicle
         // A player on the death screen (SneakyUtils enabling meanwhile, or a rejoin before respawning) stays out of
         // areas until the respawn; per-player timers that skip the dead pause them on add (PlayerTimerSub.addInternal).
         core.join(p.uniqueId, p, world.uid, loc.x, loc.y, loc.z, riding, p.gameMode == GameMode.SPECTATOR, p.isDead)
         if (riding) ensureTicker()
         for (t in playerTimers) if (t.scope == PlayerScope.ALL_ONLINE) t.addInternal(p)
+    }
+
+    /** A PlayerMoveEvent that changed the block position: the hot path, timed as stage `move` during a capture. */
+    fun moved(id: UUID, worldId: UUID, x: Double, y: Double, z: Double) = stage(STAGE_MOVE, "move") {
+        core.position(id, worldId, x, y, z, false)
     }
 
     // ---- teleport reconciliation
@@ -267,7 +357,10 @@ internal class TriggerService(
      * A [dismount] (Paper's teleport from the seat to beside the vehicle) is a move on foot in the same world: cause
      * MOVE, with path checks, like any step.
      */
-    fun teleported(p: Player, worldId: UUID, x: Double, y: Double, z: Double, dismount: Boolean = false) {
+    fun teleported(p: Player, worldId: UUID, x: Double, y: Double, z: Double, dismount: Boolean = false) =
+        stage(STAGE_TELEPORT, "teleport") { teleportedInternal(p, worldId, x, y, z, dismount) }
+
+    private fun teleportedInternal(p: Player, worldId: UUID, x: Double, y: Double, z: Double, dismount: Boolean) {
         val id = p.uniqueId
         if (overridingEventPlayer == id) requestResync(id)
         if (core.state(id) == null) return
@@ -286,14 +379,17 @@ internal class TriggerService(
     }
 
     /** The player changed world (they are in the new world now). Riding is re-read first, like on a teleport. */
-    fun worldChanged(p: Player) {
+    fun worldChanged(p: Player) = stage(STAGE_PLAYER, "player-state") {
         val loc = p.location
-        val world = loc.world ?: return
-        syncRiding(p) ?: return
+        val world = loc.world ?: return@stage
+        syncRiding(p) ?: return@stage
         core.position(p.uniqueId, world.uid, loc.x, loc.y, loc.z, true)
     }
 
-    fun respawned(p: Player, worldId: UUID, x: Double, y: Double, z: Double) {
+    fun respawned(p: Player, worldId: UUID, x: Double, y: Double, z: Double) =
+        stage(STAGE_PLAYER, "player-state") { respawnedInternal(p, worldId, x, y, z) }
+
+    private fun respawnedInternal(p: Player, worldId: UUID, x: Double, y: Double, z: Double) {
         val id = p.uniqueId
         val outer = overridingEventPlayer
         overridingEventPlayer = id
@@ -306,7 +402,7 @@ internal class TriggerService(
     }
 
     /** The player died: the engine exits their areas, and timers that skip the dead pause them until respawn. */
-    fun died(p: Player) {
+    fun died(p: Player) = stage(STAGE_PLAYER, "player-state") {
         val id = p.uniqueId
         core.death(id)
         for (t in playerTimers) if (t.skipDead) t.pause(id)
@@ -323,6 +419,11 @@ internal class TriggerService(
     internal fun resync() {
         resyncScheduled = false
         if (!running) return
+        refreshTiming()
+        stage(STAGE_RIDING, "resync") { resyncAll() }
+    }
+
+    private fun resyncAll() {
         val ids = pendingResync.toList()
         pendingResync.clear()
         for (id in ids) {
@@ -359,6 +460,11 @@ internal class TriggerService(
     internal fun applyRiding() {
         ridingCheckScheduled = false
         if (!running) return
+        refreshTiming()
+        stage(STAGE_RIDING, "riding") { applyRidingAll() }
+    }
+
+    private fun applyRidingAll() {
         val ids = pendingRiding.toList()
         pendingRiding.clear()
         for (id in ids) {
@@ -385,7 +491,7 @@ internal class TriggerService(
         return s
     }
 
-    fun playerQuit(p: Player) {
+    fun playerQuit(p: Player) = stage(STAGE_PLAYER, "player-state") {
         core.quit(p.uniqueId)
         for (t in playerTimers) t.removeInternal(p.uniqueId)
         clicks.forget(p.uniqueId)
@@ -512,7 +618,7 @@ internal class TriggerService(
      * Runs one handler call for [sub]: counts it, isolates its exceptions, and times it while timing is on.
      * Never lets a handler's exception reach the engine or Bukkit (VM errors such as OutOfMemoryError excepted).
      */
-    inline fun guard(sub: SubBase, block: () -> Unit) {
+    inline fun guard(sub: SubBase, cb: Int = SubBase.CB_MAIN, block: () -> Unit) {
         sub.calls++
         handlerCalls++
         if (!timing) {
@@ -521,7 +627,7 @@ internal class TriggerService(
             } catch (e: VirtualMachineError) {
                 throw e
             } catch (t: Throwable) {
-                handlerFailed(sub, t)
+                handlerFailed(sub, t, cb)
             }
             return
         }
@@ -533,17 +639,37 @@ internal class TriggerService(
         } catch (e: VirtualMachineError) {
             throw e
         } catch (t: Throwable) {
-            handlerFailed(sub, t)
+            handlerFailed(sub, t, cb)
         } finally {
-            sub.nanos += System.nanoTime() - t0
-            if (token != 0L) pr!!.end(sub.probeSection, token)
+            val nanos = System.nanoTime() - t0
+            sub.nanos += nanos
+            sub.timedCalls++
+            if (nanos >= SLOW_HANDLER_NANOS) handlerSlow(sub, cb, token != 0L)
+            // The section name is resolved once per subscription and capture (TriggerDiagnostics.name).
+            if (token != 0L) pr!!.end(diag.name(sub, TriggerDiagnostics.SECTION, cb), token)
         }
     }
 
+    /** A handler call took [SLOW_HANDLER_NANOS] or more: counted, and during a capture under its own name. */
+    fun handlerSlow(sub: SubBase, cb: Int, recorded: Boolean) {
+        sub.slow++
+        slowCalls++
+        if (recorded) probe?.count(diag.name(sub, TriggerDiagnostics.SLOW, cb), 1)
+    }
+
+    /** Counts during a capture: [what] ([TriggerDiagnostics.ERRORS], ...) for [sub]'s callback [cb]. Rare paths only. */
+    private fun countFor(sub: SubBase, what: Int, cb: Int, n: Long) {
+        val pr = probe ?: return
+        if (!pr.on()) return
+        if (!recording) refreshTiming() // a capture that began since the last refresh: new names
+        pr.count(diag.name(sub, what, cb), n)
+    }
+
     /** Counts the error and logs it with the stack trace at most once a minute per subscription. */
-    fun handlerFailed(sub: SubBase, t: Throwable) {
+    fun handlerFailed(sub: SubBase, t: Throwable, cb: Int = SubBase.CB_MAIN) {
         sub.errors++
         handlerErrors++
+        countFor(sub, TriggerDiagnostics.ERRORS, cb, 1)
         val now = clock()
         if (sub.lastErrorLogMillis != Long.MIN_VALUE && now - sub.lastErrorLogMillis < ERROR_LOG_INTERVAL_MILLIS) {
             sub.suppressedErrors++
@@ -571,21 +697,21 @@ internal class TriggerService(
         val sub = reg.link as? AreaSub ?: return
         val p = state.player ?: return
         if (!sub.owner.isEnabled) return
-        guard(sub) { sub.handler.onEnter(p, reg.area, cause) }
+        guard(sub, SubBase.CB_ENTER) { sub.handler.onEnter(p, reg.area, cause) }
     }
 
     override fun exit(state: PlayerState, reg: AreaReg, cause: AreaCause) {
         val sub = reg.link as? AreaSub ?: return
         val p = state.player ?: return
         if (!sub.owner.isEnabled) return
-        guard(sub) { sub.handler.onExit(p, reg.area, cause) }
+        guard(sub, SubBase.CB_EXIT) { sub.handler.onExit(p, reg.area, cause) }
     }
 
     override fun areaStep(state: PlayerState, reg: AreaReg, cause: AreaCause) {
         val sub = reg.link as? AreaSub ?: return
         val p = state.player ?: return
         if (!sub.owner.isEnabled) return
-        guard(sub) { sub.handler.onStep(p, reg.area, cause) }
+        guard(sub, SubBase.CB_STEP) { sub.handler.onStep(p, reg.area, cause) }
     }
 
     override fun step(state: PlayerState, watch: StepWatch, from: BlockKey, to: BlockKey, mounted: Boolean) {
@@ -612,20 +738,41 @@ internal class TriggerService(
 
     override fun predicateFailed(reg: AreaReg, error: Throwable) {
         val sub = reg.link as? SubBase ?: return
-        handlerFailed(sub, error)
+        handlerFailed(sub, error, SubBase.CB_PREDICATE)
     }
 
     override fun watchEnded(watch: Watch) {
         (watch.link as? SubBase)?.endedByEngine()
     }
 
-    override fun beforeDelivery() = refreshTiming()
+    override fun beforeDelivery(): Long {
+        refreshTiming()
+        val pr = probe
+        if (!timing || pr == null) return 0L
+        return pr.start()
+    }
+
+    override fun afterDelivery(token: Long) {
+        if (token != 0L) probe?.end("drain", token)
+    }
+
+    override fun selfSkipped(subject: Any, kind: Int) {
+        val sub = linkOf(subject) ?: return
+        countFor(sub, TriggerDiagnostics.SELF_SKIPPED, if (kind == EventQueue.AREA_STEP) SubBase.CB_STEP else SubBase.CB_MAIN, 1)
+    }
+
+    private fun linkOf(subject: Any?): SubBase? = when (subject) {
+        is AreaReg -> subject.link
+        is Watch -> subject.link
+        else -> null
+    } as? SubBase
 
     /** Rate limit of the loop warning: like handler errors, once a minute with a count of the rest. */
     private var lastDropLogMillis = Long.MIN_VALUE
     private var dropsSinceLog = 0L
 
     override fun eventsDropped(count: Int, lastSubject: Any?) {
+        linkOf(lastSubject)?.let { countFor(it, TriggerDiagnostics.DROPPED_AFTER, SubBase.CB_ANY, count.toLong()) }
         val now = clock()
         if (lastDropLogMillis != Long.MIN_VALUE && now - lastDropLogMillis < ERROR_LOG_INTERVAL_MILLIS) {
             dropsSinceLog += count
@@ -634,11 +781,7 @@ internal class TriggerService(
         val more = if (dropsSinceLog > 0) " ($dropsSinceLog more dropped since the last report)" else ""
         lastDropLogMillis = now
         dropsSinceLog = 0
-        val sub = when (lastSubject) {
-            is AreaReg -> lastSubject.link
-            is Watch -> lastSubject.link
-            else -> null
-        } as? SubBase
+        val sub = linkOf(lastSubject)
         plugin.logger.severe(
             "Triggers dropped $count queued events: one event set off more than " +
                 "${com.sneakyutils.triggers.engine.EventQueue.DEFAULT_MAX_PER_DRAIN} handler calls. The last one ran " +
@@ -655,7 +798,8 @@ internal class TriggerService(
         val reg = AreaReg(area, options)
         val sub = register(AreaSub(this, owner, reg, handler))
         try {
-            core.addArea(reg)
+            refreshTiming()
+            stage(STAGE_INDEX, "area-index.add") { core.addArea(reg) }
         } catch (e: RuntimeException) {
             if (!reg.active) {
                 sub.closed = true
@@ -735,12 +879,15 @@ internal class TriggerService(
         }
     }
 
-    override fun every(owner: Plugin, intervalTicks: Int, task: Runnable): Subscription {
+    override fun every(owner: Plugin, intervalTicks: Int, task: Runnable): Subscription =
+        every(owner, intervalTicks, task, TimerOptions.DEFAULT)
+
+    override fun every(owner: Plugin, intervalTicks: Int, task: Runnable, options: TimerOptions): Subscription {
         checkCall(owner)
         checkInterval(intervalTicks)
         val bucket = globalPhases.acquire(intervalTicks)
         val phase = globalPhases.phaseOf(intervalTicks, bucket)
-        val sub = register(TimerSub(this, owner, intervalTicks, task, bucket, firstDue(phase, intervalTicks)))
+        val sub = register(TimerSub(this, owner, intervalTicks, task, bucket, firstDue(phase, intervalTicks), options.label))
         globalTimers += sub
         ensureTicker()
         return sub
@@ -755,7 +902,9 @@ internal class TriggerService(
         val bucket = playerPhases.acquire(intervalTicks)
         val offset = playerPhases.phaseOf(intervalTicks, bucket)
         val scope = options.scope
-        val sub = register(PlayerTimerSub(this, owner, intervalTicks, handler, scope, bucket, offset, ticks + 1, options.skipDead))
+        val sub = register(
+            PlayerTimerSub(this, owner, intervalTicks, handler, scope, bucket, offset, ticks + 1, options.skipDead, options.label),
+        )
         if (scope == PlayerScope.ALL_ONLINE) for (p in plugin.server.onlinePlayers) sub.addInternal(p)
         playerTimers += sub
         ensureTicker()
@@ -818,6 +967,8 @@ internal class TriggerService(
         return sub
     }
 
+    override fun labelled(label: String): Triggers = LabelledTriggers(this, com.sneakyutils.triggers.TriggerLabels.check(label)!!)
+
     override fun loadTable(owner: Plugin, file: File, actions: ActionResolver): TableLoadResult {
         checkCall(owner)
         return tables.load(owner, file, actions)
@@ -839,6 +990,7 @@ internal class TriggerService(
         m["area.pass-through"] = core.passThroughs
         m["handler.calls"] = handlerCalls
         m["handler.errors"] = handlerErrors
+        m["handler.slow"] = slowCalls
         m["queue.dropped"] = core.queue.dropped
         m["queue.self-triggered"] = core.queue.selfTriggerDrops
         m["reentrant.dropped"] = core.reentrantDrops
@@ -862,7 +1014,7 @@ internal class TriggerService(
         for (s in subs) {
             byKind.merge(s.kind, 1, Int::plus)
             byOwner.getOrPut(s.owner.name) { java.util.TreeMap() }.merge(s.kind, 1, Int::plus)
-            list += SubscriptionStats(s.id, s.owner.name, s.kind, s.calls, s.errors, s.nanos)
+            list += SubscriptionStats(s.id, s.owner.name, s.kind, s.calls, s.errors, s.nanos, s.label, s.slow)
         }
         return TriggerStats(
             byKind = byKind,
@@ -908,6 +1060,23 @@ internal class TriggerService(
 
     companion object {
         const val ERROR_LOG_INTERVAL_MILLIS = 60_000L
+
+        /** A handler call this long or longer counts as slow (`handler.slow`, `/triggers top`). 1 ms. */
+        const val SLOW_HANDLER_NANOS = 1_000_000L
+
+        // Engine stages (see stage()); one bit each.
+        const val STAGE_MOVE = 1
+        const val STAGE_TELEPORT = 2
+        const val STAGE_PLAYER = 4
+        const val STAGE_RIDING = 8
+        const val STAGE_CLICK = 16
+        const val STAGE_INDEX = 32
+
+        /** Every subscription kind, for the `subscriptions.by-kind.<kind>` levels (reported as 0 when none). */
+        val KINDS = listOf(
+            AreaSub.KIND, WatchSub.STEP, WatchSub.UNDER, WatchSub.BLOCK, TimerSub.KIND, PlayerTimerSub.KIND,
+            PlayerTimerSub.KIND_ALL, BlockSub.CLICK, BlockSub.CLICK_TYPE, BlockSub.BREAK, BlockSub.BREAK_TYPE, EntitySub.KIND,
+        )
 
         /** Warning thresholds (see [warnings]). 256 areas in one chunk cost about 1 us a block step on a desktop. */
         const val DENSE_CHUNK_AREAS = 256

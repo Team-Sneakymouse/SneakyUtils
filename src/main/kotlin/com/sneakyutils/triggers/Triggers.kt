@@ -91,6 +91,13 @@ interface Triggers {
     fun every(owner: Plugin, intervalTicks: Int, task: Runnable): Subscription
 
     /**
+     * [every] with options (a diagnostics label). A default method, for implementations from before the options: they
+     * ignore the label.
+     */
+    fun every(owner: Plugin, intervalTicks: Int, task: Runnable, options: TimerOptions): Subscription =
+        every(owner, intervalTicks, task)
+
+    /**
      * Calls [handler] for each player in the timer every [intervalTicks] ticks (1..72000). Players are spread over
      * the interval's buckets, so N players cost about N / interval calls per tick. Dead players are paused until
      * they respawn (see [PlayerTimerOptions.skipDead]).
@@ -160,6 +167,20 @@ interface Triggers {
      * file can't be read or parsed at all). Reads the file on the server thread: call it on enable or reload.
      */
     fun loadTable(owner: Plugin, file: File, actions: ActionResolver): TableLoadResult
+
+    // ---- diagnostics labels
+
+    /**
+     * A view of this service that gives every subscription made through it the diagnostics [label] (see
+     * [TriggerLabels]), unless the call's options set their own. Everything else behaves as on this service, and
+     * subscriptions belong to the owner passed, as usual. Calling `labelled` on a view starts from the service again
+     * (labels don't nest). [Triggers.loadTable] through a view is not labelled. Cheap: make one per feature and keep it.
+     * A default method that ignores the label, for implementations from before labels.
+     */
+    fun labelled(label: String): Triggers {
+        TriggerLabels.check(label)
+        return this
+    }
 
     // ---- introspection
 

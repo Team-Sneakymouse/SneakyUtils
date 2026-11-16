@@ -24,6 +24,8 @@ import org.bukkit.event.player.PlayerQuitEvent
 import org.bukkit.event.player.PlayerRespawnEvent
 import org.bukkit.event.player.PlayerTeleportEvent
 import org.bukkit.event.server.PluginDisableEvent
+import org.bukkit.event.server.ServiceRegisterEvent
+import org.bukkit.event.server.ServiceUnregisterEvent
 import org.bukkit.event.world.WorldUnloadEvent
 
 /**
@@ -34,6 +36,10 @@ import org.bukkit.event.world.WorldUnloadEvent
  * mounted poll instead.
  */
 internal class TriggerListener(private val service: TriggerService) : Listener {
+    private companion object {
+        const val DIAGNOSTICS_SERVICE = "com.teamsneakymouse.sneakydiagnostics.api.Diagnostics"
+    }
+
     private val core = service.core
 
     /** The hot path. The first check is the in-place block compare; everything else is behind it. */
@@ -44,7 +50,7 @@ internal class TriggerListener(private val service: TriggerService) : Listener {
         val to = event.to
         if (from.blockX == to.blockX && from.blockY == to.blockY && from.blockZ == to.blockZ) return
         val world = to.world ?: return
-        core.position(event.player.uniqueId, world.uid, to.x, to.y, to.z, false)
+        service.moved(event.player.uniqueId, world.uid, to.x, to.y, to.z)
     }
 
     /**
@@ -103,12 +109,24 @@ internal class TriggerListener(private val service: TriggerService) : Listener {
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     fun onGameMode(event: PlayerGameModeChangeEvent) {
         val s = core.state(event.player.uniqueId) ?: return
-        core.setSpectator(s, event.newGameMode == GameMode.SPECTATOR)
+        service.stage(TriggerService.STAGE_PLAYER, "player-state") { core.setSpectator(s, event.newGameMode == GameMode.SPECTATOR) }
     }
 
     @EventHandler(priority = EventPriority.MONITOR)
     fun onPluginDisable(event: PluginDisableEvent) {
         if (event.plugin !== service.plugin) service.closeOwner(event.plugin)
+    }
+
+    // SneakyDiagnostics' service, recognised by class name (naming the class would load it). MONITOR: after the shim
+    // (integration/Probe, NORMAL) attached or dropped its probe.
+    @EventHandler(priority = EventPriority.MONITOR)
+    fun onServiceUp(event: ServiceRegisterEvent) {
+        if (event.provider.service.name == DIAGNOSTICS_SERVICE) service.diagnosticsChanged(true)
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR)
+    fun onServiceDown(event: ServiceUnregisterEvent) {
+        if (event.provider.service.name == DIAGNOSTICS_SERVICE) service.diagnosticsChanged(false)
     }
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)

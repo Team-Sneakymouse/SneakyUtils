@@ -34,13 +34,16 @@ class AreaOptions private constructor(b: Builder) {
     /** Whether [AreaHandler.onStep] is called for block steps inside the area. Default false. */
     val stepEvents: Boolean = b.stepEvents
 
+    /** Diagnostics label (see [TriggerLabels]); null: none. Default null. */
+    val label: String? = b.label
+
     fun toBuilder(): Builder = Builder()
         .riders(riders).includeSpectators(includeSpectators).passThrough(passThrough)
-        .fireOnJoin(fireOnJoin).fireOnRegister(fireOnRegister).stepEvents(stepEvents)
+        .fireOnJoin(fireOnJoin).fireOnRegister(fireOnRegister).stepEvents(stepEvents).label(label)
 
     override fun toString(): String =
         "AreaOptions(riders=$riders, includeSpectators=$includeSpectators, passThrough=$passThrough, " +
-            "fireOnJoin=$fireOnJoin, fireOnRegister=$fireOnRegister, stepEvents=$stepEvents)"
+            "fireOnJoin=$fireOnJoin, fireOnRegister=$fireOnRegister, stepEvents=$stepEvents, label=$label)"
 
     class Builder internal constructor() {
         internal var riders = RiderPolicy.SKIP
@@ -49,6 +52,7 @@ class AreaOptions private constructor(b: Builder) {
         internal var fireOnJoin = true
         internal var fireOnRegister = false
         internal var stepEvents = false
+        internal var label: String? = null
 
         fun riders(value: RiderPolicy) = apply { riders = value }
         fun includeSpectators(value: Boolean) = apply { includeSpectators = value }
@@ -56,6 +60,8 @@ class AreaOptions private constructor(b: Builder) {
         fun fireOnJoin(value: Boolean) = apply { fireOnJoin = value }
         fun fireOnRegister(value: Boolean) = apply { fireOnRegister = value }
         fun stepEvents(value: Boolean) = apply { stepEvents = value }
+        /** Diagnostics label; throws [IllegalArgumentException] unless null or valid ([TriggerLabels.check]). */
+        fun label(value: String?) = apply { label = TriggerLabels.check(value) }
         fun build(): AreaOptions = AreaOptions(this)
     }
 
@@ -87,24 +93,30 @@ class WatchOptions private constructor(b: Builder) {
     /** Also call the watch for teleports, respawns and world changes. Default false. */
     val includeTeleports: Boolean = b.includeTeleports
 
+    /** Diagnostics label (see [TriggerLabels]); null: none. Default null. */
+    val label: String? = b.label
+
     fun toBuilder(): Builder = Builder()
         .onFootOnly(onFootOnly).keepOnQuit(keepOnQuit).keepOnWorldChange(keepOnWorldChange)
-        .includeTeleports(includeTeleports)
+        .includeTeleports(includeTeleports).label(label)
 
     override fun toString(): String =
         "WatchOptions(onFootOnly=$onFootOnly, keepOnQuit=$keepOnQuit, keepOnWorldChange=$keepOnWorldChange, " +
-            "includeTeleports=$includeTeleports)"
+            "includeTeleports=$includeTeleports, label=$label)"
 
     class Builder internal constructor() {
         internal var onFootOnly = true
         internal var keepOnQuit = false
         internal var keepOnWorldChange = true
         internal var includeTeleports = false
+        internal var label: String? = null
 
         fun onFootOnly(value: Boolean) = apply { onFootOnly = value }
         fun keepOnQuit(value: Boolean) = apply { keepOnQuit = value }
         fun keepOnWorldChange(value: Boolean) = apply { keepOnWorldChange = value }
         fun includeTeleports(value: Boolean) = apply { includeTeleports = value }
+        /** Diagnostics label; throws [IllegalArgumentException] unless null or valid ([TriggerLabels.check]). */
+        fun label(value: String?) = apply { label = TriggerLabels.check(value) }
         fun build(): WatchOptions = WatchOptions(this)
     }
 
@@ -131,16 +143,22 @@ class PlayerTimerOptions private constructor(b: Builder) {
      */
     val skipDead: Boolean = b.skipDead
 
-    fun toBuilder(): Builder = Builder().scope(scope).skipDead(skipDead)
+    /** Diagnostics label (see [TriggerLabels]); null: none. Default null. */
+    val label: String? = b.label
 
-    override fun toString(): String = "PlayerTimerOptions(scope=$scope, skipDead=$skipDead)"
+    fun toBuilder(): Builder = Builder().scope(scope).skipDead(skipDead).label(label)
+
+    override fun toString(): String = "PlayerTimerOptions(scope=$scope, skipDead=$skipDead, label=$label)"
 
     class Builder internal constructor() {
         internal var scope = PlayerScope.ADDED
         internal var skipDead = true
+        internal var label: String? = null
 
         fun scope(value: PlayerScope) = apply { scope = value }
         fun skipDead(value: Boolean) = apply { skipDead = value }
+        /** Diagnostics label; throws [IllegalArgumentException] unless null or valid ([TriggerLabels.check]). */
+        fun label(value: String?) = apply { label = TriggerLabels.check(value) }
         fun build(): PlayerTimerOptions = PlayerTimerOptions(this)
     }
 
@@ -163,14 +181,20 @@ class BreakOptions private constructor(b: Builder) {
      */
     val ignoreCancelled: Boolean = b.ignoreCancelled
 
-    fun toBuilder(): Builder = Builder().ignoreCancelled(ignoreCancelled)
+    /** Diagnostics label (see [TriggerLabels]); null: none. Default null. */
+    val label: String? = b.label
 
-    override fun toString(): String = "BreakOptions(ignoreCancelled=$ignoreCancelled)"
+    fun toBuilder(): Builder = Builder().ignoreCancelled(ignoreCancelled).label(label)
+
+    override fun toString(): String = "BreakOptions(ignoreCancelled=$ignoreCancelled, label=$label)"
 
     class Builder internal constructor() {
         internal var ignoreCancelled = true
+        internal var label: String? = null
 
         fun ignoreCancelled(value: Boolean) = apply { ignoreCancelled = value }
+        /** Diagnostics label; throws [IllegalArgumentException] unless null or valid ([TriggerLabels.check]). */
+        fun label(value: String?) = apply { label = TriggerLabels.check(value) }
         fun build(): BreakOptions = BreakOptions(this)
     }
 
@@ -202,19 +226,24 @@ class ClickOptions private constructor(b: Builder) {
     /** Cancel the click when the handler returns true. Default false. */
     val cancelEvent: Boolean = b.cancelEvent
 
+    /** Diagnostics label (see [TriggerLabels]); null: none. Default null. */
+    val label: String? = b.label
+
     internal val mainHand: Boolean = EquipmentSlot.HAND in hands
     internal val offHand: Boolean = EquipmentSlot.OFF_HAND in hands
 
-    fun toBuilder(): Builder = Builder().hands(hands).sides(sides).ignoreCancelled(ignoreCancelled).cancelEvent(cancelEvent)
+    fun toBuilder(): Builder =
+        Builder().hands(hands).sides(sides).ignoreCancelled(ignoreCancelled).cancelEvent(cancelEvent).label(label)
 
     override fun toString(): String =
-        "ClickOptions(hands=$hands, sides=$sides, ignoreCancelled=$ignoreCancelled, cancelEvent=$cancelEvent)"
+        "ClickOptions(hands=$hands, sides=$sides, ignoreCancelled=$ignoreCancelled, cancelEvent=$cancelEvent, label=$label)"
 
     class Builder internal constructor() {
         internal var hands: Set<EquipmentSlot> = EnumSet.of(EquipmentSlot.HAND)
         internal var sides = ClickSide.RIGHT
         internal var ignoreCancelled = true
         internal var cancelEvent = false
+        internal var label: String? = null
 
         /** Must be non-empty and contain only [EquipmentSlot.HAND] and [EquipmentSlot.OFF_HAND]. */
         fun hands(value: Set<EquipmentSlot>) = apply {
@@ -228,6 +257,8 @@ class ClickOptions private constructor(b: Builder) {
         fun sides(value: ClickSide) = apply { sides = value }
         fun ignoreCancelled(value: Boolean) = apply { ignoreCancelled = value }
         fun cancelEvent(value: Boolean) = apply { cancelEvent = value }
+        /** Diagnostics label; throws [IllegalArgumentException] unless null or valid ([TriggerLabels.check]). */
+        fun label(value: String?) = apply { label = TriggerLabels.check(value) }
         fun build(): ClickOptions = ClickOptions(this)
     }
 
@@ -237,5 +268,69 @@ class ClickOptions private constructor(b: Builder) {
 
         @JvmStatic
         fun builder(): Builder = Builder()
+    }
+}
+
+/**
+ * Options for [Triggers.every] (global timers). Immutable; build with [builder].
+ */
+class TimerOptions private constructor(b: Builder) {
+    /** Diagnostics label (see [TriggerLabels]); null: none. Default null. */
+    val label: String? = b.label
+
+    fun toBuilder(): Builder = Builder().label(label)
+
+    override fun toString(): String = "TimerOptions(label=$label)"
+
+    class Builder internal constructor() {
+        internal var label: String? = null
+
+        /** Diagnostics label; throws [IllegalArgumentException] unless null or valid ([TriggerLabels.check]). */
+        fun label(value: String?) = apply { label = TriggerLabels.check(value) }
+        fun build(): TimerOptions = TimerOptions(this)
+    }
+
+    companion object {
+        @JvmField
+        val DEFAULT: TimerOptions = Builder().build()
+
+        @JvmStatic
+        fun builder(): Builder = Builder()
+    }
+}
+
+/**
+ * Diagnostics labels: an optional, stable name a subscription carries so SneakyDiagnostics captures and `/triggers top`
+ * tell its cost apart from other subscriptions of the same plugin and kind (see `docs/triggers.md`, Diagnostics).
+ *
+ * A label is a fixed name chosen by the subscribing plugin, the same on every start and shared by every subscription
+ * that does the same job (one rule's areas, one feature's watches). Never a player name, UUID, location, counter or
+ * other text that varies. 1 to [MAX_LENGTH] characters of `a-z 0-9 . _ : -`, starting with a letter or digit, for
+ * example `holdover:forge-bellow`. Prefix it with your plugin or feature so it reads on its own.
+ */
+object TriggerLabels {
+    const val MAX_LENGTH = 64
+
+    /** Whether [label] is a valid label. */
+    @JvmStatic
+    fun isValid(label: String): Boolean {
+        if (label.isEmpty() || label.length > MAX_LENGTH) return false
+        for (i in label.indices) {
+            val c = label[i]
+            val ok = c in 'a'..'z' || c in '0'..'9' || (i > 0 && (c == '.' || c == '_' || c == ':' || c == '-'))
+            if (!ok) return false
+        }
+        return true
+    }
+
+    /** Returns [label] when it is null or valid; otherwise throws [IllegalArgumentException]. */
+    @JvmStatic
+    fun check(label: String?): String? {
+        if (label != null) {
+            require(isValid(label)) {
+                "trigger label '$label' must be 1..$MAX_LENGTH characters of a-z 0-9 . _ : - starting with a letter or digit"
+            }
+        }
+        return label
     }
 }

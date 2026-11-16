@@ -26,6 +26,7 @@ import org.bukkit.Location;
 import org.bukkit.NamespacedKey;
 import org.bukkit.World;
 import org.bukkit.configuration.ConfigurationSection;
+import org.bukkit.configuration.MemoryConfiguration;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.Mannequin;
@@ -506,14 +507,24 @@ public abstract class WatchEngine<F> implements Listener {
         p.setGameMode(s.mode);
         p.setFlySpeed(s.flySpeed);
         p.setAllowFlight(s.allowFlight);
+        boolean returned = true;
         if (toBody) {
             back.setYaw(s.back.getYaw());
             back.setPitch(s.back.getPitch());
-            move(p, back);
+            returned = teleportOwn(p, back);
         }
         if (!riders.isEmpty()) remount(p, riders, 0);
         if (s.allowFlight) p.setFlying(s.flying);
         p.setFallDistance(0);
+        if (!returned) {
+            // Another plugin refused the way back: keep the record, so restoreSaved puts them back when they next
+            // join (as after a crash). It leaves the file only once they really are back.
+            MemoryConfiguration rec = new MemoryConfiguration();
+            writeRecord(rec, back, s);
+            pending().put(p.getUniqueId().toString(), rec);
+            plugin.getLogger().warning("Couldn't put " + p.getName() + " back where they were before watching a camera "
+                + "(teleport refused); trying again when they next join.");
+        }
         saveSessions();
         if (why != null) p.sendActionBar(why);
         left(p, s);
@@ -723,9 +734,14 @@ public abstract class WatchEngine<F> implements Listener {
 
     /** This engine's own teleports of a watcher (to the camera, back into the body). */
     public void move(Player p, Location to) {
+        teleportOwn(p, to);
+    }
+
+    /** {@link #move}, returning whether the teleport went through (another plugin may cancel it). */
+    private boolean teleportOwn(Player p, Location to) {
         moving = true;
         try {
-            p.teleport(to, PlayerTeleportEvent.TeleportCause.PLUGIN);
+            return p.teleport(to, PlayerTeleportEvent.TeleportCause.PLUGIN);
         } finally {
             moving = false;
         }
@@ -810,25 +826,27 @@ public abstract class WatchEngine<F> implements Listener {
         YamlConfiguration y = new YamlConfiguration();
         for (Map.Entry<String, ConfigurationSection> e : pending().entrySet())
             y.createSection("watching." + e.getKey(), e.getValue().getValues(true));
-        for (WatchSession s : sessions.values()) {
-            String k = "watching." + s.player + ".";
-            y.set(k + "world", s.back.getWorld().getName());
-            y.set(k + "x", s.back.getX());
-            y.set(k + "y", s.back.getY());
-            y.set(k + "z", s.back.getZ());
-            y.set(k + "yaw", (double) s.back.getYaw());
-            y.set(k + "pitch", (double) s.back.getPitch());
-            y.set(k + "mode", s.mode.name());
-            y.set(k + "allow-flight", s.allowFlight);
-            y.set(k + "flying", s.flying);
-            y.set(k + "fly-speed", (double) s.flySpeed);
-        }
+        for (WatchSession s : sessions.values()) writeRecord(y.createSection("watching." + s.player), s.back, s);
         try {
             plugin.getDataFolder().mkdirs();
             y.save(new File(plugin.getDataFolder(), sessionsFile));
         } catch (IOException ex) {
             plugin.getLogger().warning("Couldn't save " + sessionsFile + ": " + ex.getMessage());
         }
+    }
+
+    /** One sessions-file record: where to put the player back ([at]) and the state they had before watching. */
+    private static void writeRecord(ConfigurationSection c, Location at, WatchSession s) {
+        c.set("world", at.getWorld().getName());
+        c.set("x", at.getX());
+        c.set("y", at.getY());
+        c.set("z", at.getZ());
+        c.set("yaw", (double) at.getYaw());
+        c.set("pitch", (double) at.getPitch());
+        c.set("mode", s.mode.name());
+        c.set("allow-flight", s.allowFlight);
+        c.set("flying", s.flying);
+        c.set("fly-speed", (double) s.flySpeed);
     }
 
     /** Someone still marked as watching (the server stopped without letting them go): put them back. */

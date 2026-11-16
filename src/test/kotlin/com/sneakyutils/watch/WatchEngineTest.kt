@@ -204,4 +204,40 @@ class WatchEngineTest {
         assertEquals(66.0, YamlConfiguration.loadConfiguration(file).getDouble("watching.$away.y"), 1e-6)
         engine.shutdown()
     }
+
+    @Test
+    fun aRefusedReturnKeepsTheRecordUntilThePlayerIsReallyPutBack() {
+        val file = File(plugin.dataFolder, "test-sessions.yml")
+        val cam = Cam("a", Location(world, 10.5, 70.0, 10.5))
+        val engine = Engine(plugin, mapOf("a" to cam)).also { it.register() }
+        val p = server.addPlayer()
+        p.gameMode = GameMode.SURVIVAL
+        p.teleport(Location(world, 0.5, 65.0, 0.5))
+        engine.watch(p, cam)
+
+        // Another plugin refuses the teleport back into the body.
+        var refuse = true
+        val blocker = object : org.bukkit.event.Listener {
+            @org.bukkit.event.EventHandler(priority = org.bukkit.event.EventPriority.HIGHEST)
+            fun onTeleport(e: org.bukkit.event.player.PlayerTeleportEvent) {
+                if (refuse) e.isCancelled = true
+            }
+        }
+        server.pluginManager.registerEvents(blocker, plugin)
+        engine.leave(p, null, true)
+        assertFalse(WatchEngine.watchingAny(p))
+        assertTrue(p.location.y > 66.0, "still at the camera")
+        val saved = YamlConfiguration.loadConfiguration(file)
+        assertTrue(saved.isConfigurationSection("watching.${p.uniqueId}"), "the way back is kept")
+        assertEquals(65.0, saved.getDouble("watching.${p.uniqueId}.y"), 1e-6)
+
+        // Next time it can be done (their next join), they are put back and the record goes.
+        refuse = false
+        engine.restoreSaved(p)
+        assertEquals(0.5, p.location.x, 1e-6)
+        assertEquals(65.0, p.location.y, 1e-6)
+        assertEquals(GameMode.SURVIVAL, p.gameMode)
+        assertFalse(YamlConfiguration.loadConfiguration(file).isConfigurationSection("watching.${p.uniqueId}"))
+        engine.shutdown()
+    }
 }

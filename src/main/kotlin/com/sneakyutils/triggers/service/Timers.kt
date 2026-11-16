@@ -38,7 +38,8 @@ internal class TimerSub(
     @JvmField val task: Runnable,
     @JvmField val phaseBucket: Int,
     @JvmField var nextDue: Long,
-) : SubBase(service, owner, KIND) {
+    label: String? = null,
+) : SubBase(service, owner, KIND, label) {
 
     override fun release(silent: Boolean) = service.removeTimer(this)
 
@@ -65,7 +66,8 @@ internal class PlayerTimerSub(
     @JvmField val firstTick: Long,
     /** Pause players from death to respawn (see [com.sneakyutils.triggers.PlayerTimerOptions.skipDead]). */
     @JvmField val skipDead: Boolean = true,
-) : SubBase(service, owner, if (scope == PlayerScope.ALL_ONLINE) KIND_ALL else KIND), PlayerTimer {
+    label: String? = null,
+) : SubBase(service, owner, if (scope == PlayerScope.ALL_ONLINE) KIND_ALL else KIND, label), PlayerTimer {
 
     /** One player in the timer: in [bucket], or paused ([PAUSED]: dead, in no bucket). */
     internal class Entry(@JvmField val player: Player, @JvmField val bucket: Int) {
@@ -145,6 +147,9 @@ internal class PlayerTimerSub(
             service.requireMainThread()
             return entries.size
         }
+
+    /** [size] without the thread check, for the diagnostics sampler. */
+    internal val sizeInternal: Int get() = entries.size
 
     /** Players per bucket, for tests of the spread. */
     internal fun bucketLoad(bucket: Int): Int = balancer.load(bucket)

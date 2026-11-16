@@ -34,7 +34,7 @@ internal class BlockSub(
     @JvmField val brk: BlockBreakHandler?,
     @JvmField val options: ClickOptions,
     @JvmField val breakOptions: BreakOptions = BreakOptions.DEFAULT,
-) : SubBase(service, owner, kind) {
+) : SubBase(service, owner, kind, if (brk != null) breakOptions.label else options.label) {
     override fun release(silent: Boolean) = service.clicks.remove(this)
 
     companion object {
@@ -51,7 +51,7 @@ internal class EntitySub(
     @JvmField val match: EntityMatch,
     @JvmField val handler: EntityClickHandler,
     @JvmField val options: ClickOptions,
-) : SubBase(service, owner, KIND) {
+) : SubBase(service, owner, KIND, options.label) {
     override fun release(silent: Boolean) = service.clicks.remove(this)
 
     companion object {
@@ -294,8 +294,10 @@ internal class ClickIndex(private val service: TriggerService) {
         var cancelled = false
         if (atPos != null || ofType != null) {
             service.refreshTiming()
-            if (atPos != null) cancelled = dispatchClick(atPos, e, player, block, side)
-            if (ofType != null) cancelled = dispatchClick(ofType, e, player, block, side) || cancelled
+            service.stage(TriggerService.STAGE_CLICK, "click.block") {
+                if (atPos != null) cancelled = dispatchClick(atPos, e, player, block, side)
+                if (ofType != null) cancelled = dispatchClick(ofType, e, player, block, side) || cancelled
+            }
         }
         if (side != ClickSide.RIGHT) return
         // After the subscriptions (both-hands ones still get the off-hand event as it came), and whatever is
@@ -341,8 +343,10 @@ internal class ClickIndex(private val service: TriggerService) {
         if (atPos == null && ofType == null) return
         service.refreshTiming()
         val player = e.player
-        if (atPos != null) dispatchBreak(atPos, e, player, block)
-        if (ofType != null) dispatchBreak(ofType, e, player, block)
+        service.stage(TriggerService.STAGE_CLICK, "click.break") {
+            if (atPos != null) dispatchBreak(atPos, e, player, block)
+            if (ofType != null) dispatchBreak(ofType, e, player, block)
+        }
     }
 
     private fun dispatchBreak(subs: Array<BlockSub>, e: BlockBreakEvent, player: Player, block: Block) {
@@ -367,8 +371,10 @@ internal class ClickIndex(private val service: TriggerService) {
         var cancelled = false
         if (typed != null || any.isNotEmpty()) {
             service.refreshTiming()
-            if (typed != null) cancelled = dispatchEntity(typed, e, player, entity, side, hand)
-            if (any.isNotEmpty()) cancelled = dispatchEntity(any, e, player, entity, side, hand) || cancelled
+            service.stage(TriggerService.STAGE_CLICK, "click.entity") {
+                if (typed != null) cancelled = dispatchEntity(typed, e, player, entity, side, hand)
+                if (any.isNotEmpty()) cancelled = dispatchEntity(any, e, player, entity, side, hand) || cancelled
+            }
         }
         if (side != ClickSide.RIGHT) return cancelled
         // After the subscriptions (both-hands ones still get the off-hand event as it came), and whatever is

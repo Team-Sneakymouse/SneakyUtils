@@ -9,6 +9,8 @@ import org.bukkit.configuration.MemoryConfiguration
 import org.bukkit.entity.ArmorStand
 import org.bukkit.entity.Entity
 import org.bukkit.entity.Player
+import org.bukkit.configuration.file.YamlConfiguration
+import org.bukkit.plugin.Plugin
 import org.bukkit.util.Vector
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
@@ -20,6 +22,8 @@ import org.junit.jupiter.api.Test
 import org.mockbukkit.mockbukkit.MockBukkit
 import org.mockbukkit.mockbukkit.ServerMock
 import org.mockbukkit.mockbukkit.world.WorldMock
+import java.io.File
+import java.util.UUID
 
 class WatchEngineTest {
 
@@ -49,15 +53,26 @@ class WatchEngineTest {
         override fun left(p: Player, s: WatchSession) { left++ }
     }
 
+    /** MockBukkit has no plugin chunk tickets: Paper's contract, one ticket per plugin per chunk. */
+    class TicketWorld : WorldMock(Material.STONE, 64) {
+        val tickets = HashMap<Long, MutableSet<Plugin>>()
+        private fun key(x: Int, z: Int) = (x.toLong() shl 32) or (z.toLong() and 0xffffffffL)
+        override fun addPluginChunkTicket(x: Int, z: Int, plugin: Plugin) =
+            tickets.getOrPut(key(x, z)) { HashSet() }.add(plugin)
+        override fun removePluginChunkTicket(x: Int, z: Int, plugin: Plugin) =
+            tickets[key(x, z)]?.remove(plugin) ?: false
+        override fun getPluginChunkTickets(x: Int, z: Int): Collection<Plugin> = tickets[key(x, z)].orEmpty().toList()
+    }
+
     private lateinit var server: ServerMock
     private lateinit var plugin: SneakyUtils
-    private lateinit var world: WorldMock
+    private lateinit var world: TicketWorld
 
     @BeforeEach
     fun setUp() {
         server = MockBukkit.mock()
         plugin = MockBukkit.load(SneakyUtils::class.java)
-        world = WorldMock(Material.STONE, 64)
+        world = TicketWorld()
         server.addWorld(world)
     }
 
@@ -115,6 +130,78 @@ class WatchEngineTest {
         cams.clear()
         engine.tickSessions()
         assertFalse(engine.sessions().containsKey(p.uniqueId))
+        engine.shutdown()
+    }
+
+    @Test
+    fun aBodyKeepsItsChunkLoadedUntilTheLastWatcherThereLeaves() {
+        val cam = Cam("a", Location(world, 100.5, 70.0, 100.5))
+        val one = Engine(plugin, mapOf("a" to cam)).also { it.register() }
+        val two = Engine(plugin, mapOf("a" to cam)).also { it.register() }
+        val a = server.addPlayer().also { it.teleport(Location(world, 1.5, 65.0, 1.5)) }
+        val b = server.addPlayer().also { it.teleport(Location(world, 3.5, 65.0, 3.5)) }
+
+        one.watch(a, cam)
+        two.watch(b, cam)
+        assertTrue(plugin in world.getPluginChunkTickets(0, 0))
+        one.leave(a, null, true)
+        assertTrue(plugin in world.getPluginChunkTickets(0, 0), "b's body is still in the chunk")
+        two.leave(b, null, true)
+        assertFalse(plugin in world.getPluginChunkTickets(0, 0))
+        one.shutdown()
+        two.shutdown()
+    }
+
+    @Test
+    fun anotherWatchKeepsTheRecordsOfPlayersNotYetPutBack() {
+        val file = File(plugin.dataFolder, "test-sessions.yml")
+        val away = UUID.randomUUID()
+        plugin.dataFolder.mkdirs()
+        YamlConfiguration().apply {
+            set("watching.$away.world", world.name)
+            set("watching.$away.x", 5.5)
+            set("watching.$away.y", 66.0)
+            set("watching.$away.z", 7.5)
+            set("watching.$away.mode", "CREATIVE")
+        }.save(file)
+        val cam = Cam("a", Location(world, 10.5, 70.0, 10.5))
+        val engine = Engine(plugin, mapOf("a" to cam)).also { it.register() }
+        val p = server.addPlayer()
+
+        engine.watch(p, cam)
+        engine.leave(p, null, true)
+        val saved = YamlConfiguration.loadConfiguration(file)
+        assertTrue(saved.isConfigurationSection("watching.$away"), "the crashed watcher's record is kept")
+        assertFalse(saved.isConfigurationSection("watching.${p.uniqueId}"))
+
+        val back = org.mockbukkit.mockbukkit.entity.PlayerMock(server, "Away", away).also { server.addPlayer(it) }
+        engine.restoreSaved(back)
+        assertEquals(GameMode.CREATIVE, back.gameMode)
+        assertEquals(5.5, back.location.x, 1e-6)
+        assertFalse(YamlConfiguration.loadConfiguration(file).isConfigurationSection("watching.$away"))
+        engine.shutdown()
+    }
+
+    @Test
+    fun aRecordStaysUntilThePlayerIsReallyPutBack() {
+        val file = File(plugin.dataFolder, "test-sessions.yml")
+        val away = UUID.randomUUID()
+        plugin.dataFolder.mkdirs()
+        YamlConfiguration().apply {
+            set("watching.$away.world", "not-loaded")
+            set("watching.$away.x", 5.5)
+            set("watching.$away.y", 66.0)
+            set("watching.$away.z", 7.5)
+        }.save(file)
+        val cam = Cam("a", Location(world, 10.5, 70.0, 10.5))
+        val engine = Engine(plugin, mapOf("a" to cam)).also { it.register() }
+        val back = org.mockbukkit.mockbukkit.entity.PlayerMock(server, "Away", away).also { server.addPlayer(it) }
+        engine.restoreSaved(back)
+        engine.saveSessions()
+        assertTrue(YamlConfiguration.loadConfiguration(file).isConfigurationSection("watching.$away"))
+        engine.watch(back, cam)                       // not while still waiting to be put back
+        assertFalse(engine.sessions().containsKey(away))
+        assertEquals(66.0, YamlConfiguration.loadConfiguration(file).getDouble("watching.$away.y"), 1e-6)
         engine.shutdown()
     }
 }

@@ -22,6 +22,8 @@ This is a live Paper plugin (not a compile-only library). Install the JAR on the
 - `ServerUtil` — server display name and kebab-case server id from the `P_SERVER_NAME` environment variable. Platform-free (in `sneakyutils-common`), so Velocity plugins can use it too
 - `com.sneakyutils.watch.WatchEngine` — looking through a camera (from SneakyCCTV): eye held at the lens within a look cone, a mannequin body left behind, adventure/spectator watching with `WatchRestrictions`, left/right switching, crash-safe sessions file; one subclass per kind of camera (SneakyCCTV, SneakyHaunted's ghost cams), a player in one at a time. `Directions` holds the yaw/pitch/cone maths
 - Cross-plugin ports: `InventoryUtility` (Paper YAML + legacy Base64), `PermissionUtility`, `PoseFacing` / `Direction`, `ItemMetaText`
+- `com.sneakyutils.triggers` (`SneakyUtils.getTriggers()`) — shared trigger service replacing MagicSpells passive triggers: areas (enter/exit/pass-through, rider policy), per-player step and block watches, staggered global and per-player timers, block click/type/break and entity click indexes, YAML data tables with named actions; `/triggers` stats (permission `sneakyutils.command.triggers`), optional SneakyDiagnostics timing. Usage and rules: [docs/triggers.md](docs/triggers.md)
+- `com.sneakyutils.signals` — shared gameplay events (`ArrestEvent`, `DutyChangedEvent`, `ActivityEvent`) with `fire(...)` helpers that skip building the event when nobody listens
 
 ## Consumer usage
 
@@ -41,7 +43,9 @@ dependencies {
 }
 ```
 
-Ensure `SneakyUtils` is installed and loads before plugins that call `SneakyUtils.getAlteredBlockManager()`.
+Ensure `SneakyUtils` is installed and loads before plugins that call `SneakyUtils.getAlteredBlockManager()` or `SneakyUtils.getTriggers()`.
+
+SneakyUtils optionally depends on SneakyDiagnostics (`load: BEFORE`, not required) to time triggers during captures; the API is compile-only and never bundled.
 
 ### Platform-free helpers (`sneakyutils-common`)
 

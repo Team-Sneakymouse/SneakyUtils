@@ -281,8 +281,9 @@ object BlockUtils {
 
         var current = nearest
         if (current != null) {
-            while (true) {
-                val below = current!!.getRelative(BlockFace.DOWN)
+            val bottom = location.world!!.minHeight              // an air column over the void has no ground
+            while (current!!.y > bottom) {
+                val below = current.getRelative(BlockFace.DOWN)
                 if (isAir(below.type)) {
                     current = below
                 } else {

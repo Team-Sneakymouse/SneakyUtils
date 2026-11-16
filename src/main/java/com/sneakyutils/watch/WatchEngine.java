@@ -84,6 +84,14 @@ public abstract class WatchEngine<F> implements Listener {
 
     private static final List<WatchEngine<?>> ENGINES = new CopyOnWriteArrayList<>();
 
+    /**
+     * How many bodies hold each plugin chunk ticket. Paper keeps one ticket per plugin per chunk, so it is added for
+     * every body and removed only when the last body in that chunk (from any engine of that plugin) is gone.
+     */
+    private static final Map<TicketKey, Integer> TICKET_USERS = new HashMap<>();
+
+    private record TicketKey(org.bukkit.plugin.Plugin plugin, UUID world, int x, int z) {}
+
     private static final EquipmentSlot[] WORN = {EquipmentSlot.HAND, EquipmentSlot.OFF_HAND, EquipmentSlot.HEAD,
         EquipmentSlot.CHEST, EquipmentSlot.LEGS, EquipmentSlot.FEET};
 
@@ -98,6 +106,8 @@ public abstract class WatchEngine<F> implements Listener {
     private final WatchRestrictions restrictions = new WatchRestrictions(this);
     /** set while this engine moves a watcher, so onTeleport knows it's ours */
     private boolean moving;
+    /** Recovery records from the sessions file for players not yet put back (loaded on first use), by player. */
+    private Map<String, ConfigurationSection> pending;
 
     /**
      * sessionsFile: in the plugin's data folder. The body's tag is {@code <plugin>:body} and the shrinking modifier's
@@ -295,7 +305,9 @@ public abstract class WatchEngine<F> implements Listener {
         WatchSession s = sessions.get(p.getUniqueId());
         boolean first = s == null;
         if (first) {
-            if (p.isInsideVehicle() || p.isDead() || watchingAny(p) || !canWatch(p)) {
+            // still waiting to be put back from a crash: a new session would replace that record
+            if (p.isInsideVehicle() || p.isDead() || watchingAny(p) || pending().containsKey(p.getUniqueId().toString())
+                || !canWatch(p)) {
                 p.sendActionBar(msg("cant-now", "&7You can't watch cameras right now."));
                 return;
             }
@@ -346,7 +358,18 @@ public abstract class WatchEngine<F> implements Listener {
         s.ticketWorld = at.getWorld();
         s.ticketX = at.getBlockX() >> 4;
         s.ticketZ = at.getBlockZ() >> 4;
-        s.ticketWorld.addPluginChunkTicket(s.ticketX, s.ticketZ, plugin);
+        holdTicket(s.ticketWorld, s.ticketX, s.ticketZ);
+    }
+
+    private void holdTicket(World w, int x, int z) {
+        TICKET_USERS.merge(new TicketKey(plugin, w.getUID(), x, z), 1, Integer::sum);
+        w.addPluginChunkTicket(x, z, plugin);
+    }
+
+    private void releaseTicket(World w, int x, int z) {
+        TicketKey k = new TicketKey(plugin, w.getUID(), x, z);
+        Integer left = TICKET_USERS.computeIfPresent(k, (key, n) -> n > 1 ? n - 1 : null);
+        if (left == null) w.removePluginChunkTicket(x, z, plugin);
     }
 
     /** The body itself: a mannequin in their skin (as shown now), clothes and hands, with their name over it. */
@@ -476,7 +499,7 @@ public abstract class WatchEngine<F> implements Listener {
         if (body != null) body.remove();
         Entity zzz = s.zzz == null ? null : Bukkit.getEntity(s.zzz);
         if (zzz != null) zzz.remove();
-        if (s.ticketWorld != null) s.ticketWorld.removePluginChunkTicket(s.ticketX, s.ticketZ, plugin);
+        if (s.ticketWorld != null) releaseTicket(s.ticketWorld, s.ticketX, s.ticketZ);
         if (s.adventure) endAdventure(p, s);
         PlayerUtil.reveal(plugin, p);                                  // before remount: their riders show again
         lastInput.remove(p.getUniqueId());
@@ -779,8 +802,14 @@ public abstract class WatchEngine<F> implements Listener {
 
     // ------------------------------------------------------------------ the sessions file (a crash mid-watch)
 
+    /**
+     * Writes the active sessions, keeping the records of players still waiting to be put back after a crash (they
+     * leave the file only once {@link #restoreSaved} has restored them).
+     */
     public void saveSessions() {
         YamlConfiguration y = new YamlConfiguration();
+        for (Map.Entry<String, ConfigurationSection> e : pending().entrySet())
+            y.createSection("watching." + e.getKey(), e.getValue().getValues(true));
         for (WatchSession s : sessions.values()) {
             String k = "watching." + s.player + ".";
             y.set(k + "world", s.back.getWorld().getName());
@@ -805,11 +834,11 @@ public abstract class WatchEngine<F> implements Listener {
     /** Someone still marked as watching (the server stopped without letting them go): put them back. */
     public void restoreSaved(Player p) {
         if (sessions.containsKey(p.getUniqueId())) return;
-        File f = new File(plugin.getDataFolder(), sessionsFile);
-        if (!f.exists()) return;
-        YamlConfiguration y = YamlConfiguration.loadConfiguration(f);
+        ConfigurationSection rec = pending().get(p.getUniqueId().toString());
+        if (rec == null) return;
+        YamlConfiguration y = new YamlConfiguration();
         String k = "watching." + p.getUniqueId();
-        if (!y.isConfigurationSection(k)) return;
+        y.createSection(k, rec.getValues(true));
         World w = Bukkit.getWorld(y.getString(k + ".world", ""));
         GameMode mode;
         try {
@@ -823,15 +852,38 @@ public abstract class WatchEngine<F> implements Listener {
         p.setCollidable(true);
         p.setFlySpeed((float) Math.max(-1, Math.min(1, y.getDouble(k + ".fly-speed", 0.1))));
         p.setAllowFlight(y.getBoolean(k + ".allow-flight"));
-        if (w != null) p.teleport(new Location(w, y.getDouble(k + ".x"), y.getDouble(k + ".y"), y.getDouble(k + ".z"),
-            (float) y.getDouble(k + ".yaw"), (float) y.getDouble(k + ".pitch")));
+        boolean back = w != null && p.teleport(new Location(w, y.getDouble(k + ".x"), y.getDouble(k + ".y"),
+            y.getDouble(k + ".z"), (float) y.getDouble(k + ".yaw"), (float) y.getDouble(k + ".pitch")));
         if (p.getAllowFlight()) p.setFlying(y.getBoolean(k + ".flying"));
-        y.set(k, null);
-        try {
-            y.save(f);
-        } catch (IOException ex) {
-            plugin.getLogger().warning("Couldn't save " + sessionsFile + ": " + ex.getMessage());
+        if (!back) {                                                      // kept: tried again when they next join
+            plugin.getLogger().warning("Couldn't put " + p.getName() + " back where they were before watching a camera ("
+                + (w == null ? "world " + y.getString(k + ".world") + " isn't loaded" : "teleport refused")
+                + "); trying again when they next join.");
+            return;
         }
+        pending.remove(p.getUniqueId().toString());
+        saveSessions();
         plugin.getLogger().info("Put " + p.getName() + " back where they were before watching a camera.");
+    }
+
+    /** The sessions file's records not belonging to an active session, read from disk the first time they're needed. */
+    private Map<String, ConfigurationSection> pending() {
+        if (pending != null) return pending;
+        pending = new HashMap<>();
+        File f = new File(plugin.getDataFolder(), sessionsFile);
+        if (!f.exists()) return pending;
+        ConfigurationSection watching = YamlConfiguration.loadConfiguration(f).getConfigurationSection("watching");
+        if (watching == null) return pending;
+        for (String id : watching.getKeys(false)) {
+            ConfigurationSection rec = watching.getConfigurationSection(id);
+            if (rec == null) continue;
+            try {
+                if (sessions.containsKey(UUID.fromString(id))) continue;
+            } catch (IllegalArgumentException ex) {
+                // not a player id: kept as it was
+            }
+            pending.put(id, rec);
+        }
+        return pending;
     }
 }

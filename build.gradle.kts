@@ -12,7 +12,7 @@ plugins {
 
 // Requires a git checkout with at least one commit (CI and local clones).
 val gitVersion =
-    providers.exec {
+    providers.gradleProperty("version").orElse(providers.exec {
         workingDir(rootDir)
         commandLine("git", "show", "-s", "--format=%ct:%h", "--abbrev=12", "HEAD")
     }.standardOutput.asText.map { commit ->
@@ -21,7 +21,7 @@ val gitVersion =
             DateTimeFormatter.ofPattern("yyyy.MM.dd").withZone(ZoneOffset.UTC)
                 .format(Instant.ofEpochSecond(timestamp.toLong()))
         "$date-$hash"
-    }.get()
+    }).get()
 
 // Shared by the Paper plugin and :common so the published versions always match.
 allprojects {
@@ -33,6 +33,10 @@ repositories {
     mavenCentral()
     maven("https://repo.extendedclip.com/content/repositories/placeholderapi/")
     maven("https://repo.papermc.io/repository/maven-public/")
+    // Team artifacts (SneakyDiagnostics-API) only.
+    maven("https://maven.sneakyrp.com/releases") {
+        content { includeGroup("io.github.team-sneakymouse") }
+    }
 }
 
 val paperApi = "26.2.build.+"
@@ -46,6 +50,8 @@ dependencies {
     compileOnly("me.clip:placeholderapi:2.11.5")
     // PlayerConcealment's packet handler; the server provides Netty.
     compileOnly("io.netty:netty-transport:4.2.15.Final")
+    // Optional: trigger timing during SneakyDiagnostics captures (integration/Probe.java). Never bundled.
+    compileOnly("io.github.team-sneakymouse:SneakyDiagnostics-API:2026.10.30-3b422b67e32e")
     implementation("org.jetbrains.kotlin:kotlin-stdlib:2.3.21")
 
     testImplementation("io.papermc.paper:paper-api:$paperApi")
@@ -54,6 +60,7 @@ dependencies {
     testImplementation("org.mockbukkit.mockbukkit:mockbukkit-v26.2:$mockBukkitVersion")
     testImplementation("me.clip:placeholderapi:2.11.5")
     testImplementation("io.netty:netty-transport:4.2.15.Final")
+    testImplementation("io.github.team-sneakymouse:SneakyDiagnostics-API:2026.10.30-3b422b67e32e")
     testImplementation("org.mockito:mockito-core:5.21.0")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
@@ -95,6 +102,14 @@ tasks {
 
     test {
         useJUnitPlatform()
+        // Opt-in long runs of the trigger engine's randomized tests, e.g. ./gradlew test -Dtriggers.soak=200000
+        // (see MovementModelTest): soak (sequences), seed (base seed), replay (one sequence seed).
+        for (key in listOf("triggers.soak", "triggers.seed", "triggers.replay")) {
+            providers.systemProperty(key).orNull?.let {
+                systemProperty(key, it)
+                inputs.property(key, it)
+            }
+        }
     }
 
     val publishPreflight by registering(Exec::class) {

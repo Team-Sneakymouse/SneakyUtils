@@ -18,17 +18,17 @@ object PermissionUtility {
         return getMaxNumber(player, permissionNode)
     }
 
+    /** Only granted nodes count, and only those whose whole remainder after `permissionNode.` is a number. */
     @JvmStatic
     fun getMaxNumber(permissible: Permissible, permissionNode: String): Int {
         val prefix = "$permissionNode."
-        return permissible.effectivePermissions.stream()
-            .filter { p -> p.permission.startsWith(prefix) }
-            .map { p ->
-                val split = p.permission.split('.')
-                split[split.size - 1].toInt()
-            }
-            .max(Integer::compare)
-            .orElse(0)
+        var max: Int? = null
+        for (p in permissible.effectivePermissions) {
+            if (!p.value || !p.permission.startsWith(prefix, ignoreCase = true)) continue
+            val n = p.permission.substring(prefix.length).toIntOrNull() ?: continue
+            if (max == null || n > max) max = n
+        }
+        return max ?: 0
     }
 
     @JvmStatic
@@ -37,8 +37,8 @@ object PermissionUtility {
         return hasNode(player, permissionNode)
     }
 
+    /** Whether exactly this node is set and granted (true) on the permissible. */
     @JvmStatic
     fun hasNode(permissible: Permissible, permissionNode: String): Boolean =
-        permissible.effectivePermissions.stream()
-            .anyMatch { p -> p.permission.contains(permissionNode) }
+        permissible.effectivePermissions.any { p -> p.value && p.permission.equals(permissionNode, ignoreCase = true) }
 }

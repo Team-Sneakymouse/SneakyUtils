@@ -12,3 +12,13 @@ dependencies:
       load: BEFORE
       required: false
       join-classpath: true
+    # Optional: trigger timing during captures. SneakyDiagnostics depends on nothing of ours, so no cycle.
+    SneakyDiagnostics:
+      load: BEFORE
+      required: false
+      join-classpath: true
+
+permissions:
+  sneakyutils.command.triggers:
+    description: Show trigger service stats and turn handler profiling on or off (/triggers).
+    default: op

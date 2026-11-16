@@ -24,49 +24,6 @@ class DiagnosticsAndCommandTest {
     private lateinit var world: WorldMock
     private lateinit var triggers: Triggers
 
-    /** Records what the shim reports. [capturing] plays the part of a running capture. */
-    private class FakeProbe : Diagnostics.Probe {
-        var capturing = false
-        var due = false
-        var onCalls = 0
-        var next = 0L
-        val sections = ArrayList<String>()
-        val counts = HashMap<String, Long>()
-        val levels = HashMap<String, Long>()
-
-        override fun start(): Long = if (capturing) ++next else 0L
-        override fun end(section: String, token: Long) {
-            sections += section
-        }
-
-        override fun count(key: String, n: Long) {
-            counts.merge(key, n, Long::plus)
-        }
-
-        override fun sampleDue(): Boolean = due
-        override fun level(key: String, value: Long) {
-            levels[key] = value
-        }
-
-        override fun on(): Boolean {
-            onCalls++
-            return capturing
-        }
-
-        override fun close() {}
-    }
-
-    private class FakeDiagnostics(val probe: FakeProbe) : Diagnostics {
-        var instrumentation: String? = null
-        override fun register(plugin: String, version: String, instrumentation: String, provider: Diagnostics.Provider): Diagnostics.Registration =
-            throw UnsupportedOperationException()
-
-        override fun probe(plugin: String, pluginVersion: String, instrumentation: String): Diagnostics.Probe {
-            this.instrumentation = instrumentation
-            return probe
-        }
-    }
-
     private fun start(withDiagnostics: FakeDiagnostics?) {
         server = MockBukkit.mock()
         world = server.addSimpleWorld("world")
@@ -104,7 +61,7 @@ class DiagnosticsAndCommandTest {
         val probe = FakeProbe()
         val diagnostics = FakeDiagnostics(probe)
         start(diagnostics)
-        assertEquals("sneakyutils-ticks-1", diagnostics.instrumentation)
+        assertEquals("sneakyutils-ticks-2", diagnostics.instrumentation)
         triggers.area(owner, Area.box(world, 0, 60, 0, 5, 70, 5), AreaHandler.onEnter { _, _, _ -> })
         val p = server.addPlayer()
         p.teleport(Location(world, 20.5, 64.0, 2.5))
@@ -114,13 +71,41 @@ class DiagnosticsAndCommandTest {
         probe.capturing = true
         p.simulatePlayerMove(Location(world, 20.5, 64.0, 2.5))
         p.simulatePlayerMove(Location(world, 2.5, 64.0, 2.5))
-        assertEquals(listOf("sub.owner.area", "sub.owner.area"), probe.sections, "the exit (default no-op) and the enter")
+        // The first move's drain notices the capture (timing on); from the second move on the move itself is a stage.
+        assertEquals(
+            listOf("handler.owner.area-exit", "drain", "handler.owner.area-enter", "drain", "move"),
+            probe.sections,
+            "the exit (default no-op) and the enter, inside their drain and move",
+        )
+        assertEquals(0, probe.nestingErrors)
         assertTrue(triggers.stats().subscriptions.single { it.kind == "area" }.nanos > 0)
 
         probe.sections.clear()
         triggers.every(owner, 1) {}
         server.scheduler.performOneTick()
-        assertEquals(listOf("sub.owner.timer", "tick.timers", "tick"), probe.sections, "strictly nested, inner first")
+        assertEquals(listOf("handler.owner.timer", "tick.timers", "tick"), probe.sections, "strictly nested, inner first")
+        assertEquals(0, probe.nestingErrors)
+    }
+
+    @Test
+    fun sneakyDiagnosticsInstalledAfterStartupGetsTheSamplerAndAttribution() {
+        start(null)
+        assertEquals(0, server.scheduler.pendingTasks.count { it.owner === su })
+        triggers.labelled("owner:gate").area(owner, Area.box(world, 0, 60, 0, 5, 70, 5), AreaHandler.onEnter { _, _, _ -> })
+        val probe = FakeProbe().also { it.capturing = true; it.due = true }
+        val diag = MockBukkit.createMockPlugin("SneakyDiagnostics")
+        server.servicesManager.register(Diagnostics::class.java, FakeDiagnostics(probe), diag, ServicePriority.Normal)
+        assertEquals(1, server.scheduler.pendingTasks.count { it.owner === su }, "the sampler starts with the service")
+        val p = server.addPlayer()
+        p.teleport(Location(world, 20.5, 64.0, 2.5))
+        p.simulatePlayerMove(Location(world, 2.5, 64.0, 2.5))
+        assertTrue("handler.owner.area-enter.owner:gate" in probe.sections, probe.sections.toString())
+        server.scheduler.performTicks(20)
+        assertEquals(1L, probe.levels["subscriptions.by-owner.owner.area"])
+
+        // The service goes away during a capture: timing is off at once, not at the next event.
+        server.servicesManager.unregisterAll(diag)
+        assertFalse((triggers as TriggerService).timing)
     }
 
     @Test
@@ -268,6 +253,7 @@ class DiagnosticsAndCommandTest {
         assertTrue(top.contains("Top by calls:"), top.toString())
         assertTrue(top.contains("Top by time:"), top.toString())
         assertTrue(top.any { it.contains("Owner:area#") }, top.toString())
+        assertTrue(top.any { it.contains("us/call  timed calls 1  slow 0") }, top.toString())
 
         server.dispatchCommand(p, "triggers profile off")
         assertEquals(listOf("Trigger profiling off."), messages(p))

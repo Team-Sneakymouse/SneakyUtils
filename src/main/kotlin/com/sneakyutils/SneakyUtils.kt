@@ -17,7 +17,7 @@ import org.bukkit.plugin.java.JavaPlugin
 open class SneakyUtils : JavaPlugin() {
 
     /** SneakyDiagnostics measurements (optional; does nothing without SneakyDiagnostics). */
-    private val probe = Probe(this, "sneakyutils-ticks-1")
+    private val probe = Probe(this, "sneakyutils-ticks-2")
 
     companion object {
         const val IDENTIFIER = "sneakyutils"

@@ -13,7 +13,8 @@ import java.util.Locale
  *
  * - `stats` (default): subscriptions per kind and owner, areas and chunks indexed, players tracked and riding,
  *   all-online timers (flagged), and every always-on counter.
- * - `top`: the subscriptions with the most handler calls, and with the most handler time while timing was on.
+ * - `top`: the subscriptions with the most handler calls, and with the most handler time while timing was on, with
+ *   their diagnostics labels and slow calls (1 ms or more).
  * - `profile on|off`: time every handler call with `System.nanoTime` without a SneakyDiagnostics capture. `on` clears
  *   the previous times. Leave it off in normal play: timing costs two clock reads per handler call.
  */
@@ -66,16 +67,18 @@ internal class TriggersCommand(private val running: () -> TriggerService?) {
         val out = ArrayList<String>()
         val byCalls = subs.filter { it.calls > 0 }.sortedByDescending { it.calls }.take(n)
         out += if (byCalls.isEmpty()) "No handler calls yet." else "Top by calls:"
-        for (s in byCalls) out += "  ${s.id}  calls ${s.calls}  errors ${s.errors}"
-        val byTime = subs.filter { it.nanos > 0 }.sortedByDescending { it.nanos }.take(n)
+        for (s in byCalls) out += "  ${name(s)}  calls ${s.calls}  errors ${s.errors}"
+        // Averages over the measured calls only (calls made while timing was off took unknown time).
+        val byTime = service.subscriptions().filter { it.nanos > 0 }.sortedByDescending { it.nanos }.take(n)
         if (byTime.isEmpty()) {
             out += "No handler time measured (needs a SneakyDiagnostics capture or /triggers profile on)."
         } else {
             out += "Top by time:"
             for (s in byTime) {
                 val ms = s.nanos / 1_000_000.0
-                val avgUs = s.nanos / 1000.0 / s.calls.coerceAtLeast(1)
-                out += "  ${s.id}  ${fmt(ms)} ms total  ${fmt(avgUs)} us/call  calls ${s.calls}"
+                val avgUs = s.nanos / 1000.0 / s.timedCalls.coerceAtLeast(1)
+                val label = if (s.label != null) "${s.id} [${s.label}]" else s.id
+                out += "  $label  ${fmt(ms)} ms total  ${fmt(avgUs)} us/call  timed calls ${s.timedCalls}  slow ${s.slow}"
             }
         }
         return out
@@ -83,7 +86,11 @@ internal class TriggersCommand(private val running: () -> TriggerService?) {
 
     fun profile(on: Boolean): List<String> {
         if (on) {
-            for (sub in service.subscriptions()) sub.nanos = 0
+            for (sub in service.subscriptions()) {
+                sub.nanos = 0
+                sub.slow = 0
+                sub.timedCalls = 0
+            }
             service.pollNanos = 0
         }
         service.profileOn = on
@@ -94,6 +101,9 @@ internal class TriggersCommand(private val running: () -> TriggerService?) {
     companion object {
         const val PERMISSION = "sneakyutils.command.triggers"
         private const val TOP = 10
+
+        /** The subscription id, with its diagnostics label when it has one. */
+        private fun name(s: com.sneakyutils.triggers.SubscriptionStats) = if (s.label != null) "${s.id} [${s.label}]" else s.id
 
         private fun join(m: Map<String, Int>) = m.entries.joinToString(", ") { "${it.key} ${it.value}" }
         private fun fmt(v: Double) = String.format(Locale.ROOT, "%.3f", v)

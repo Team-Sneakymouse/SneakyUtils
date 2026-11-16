@@ -37,14 +37,20 @@ class TriggerStats @JvmOverloads constructor(
             "trackedPlayers=$trackedPlayers, mountedPlayers=$mountedPlayers, counters=$counters)"
 }
 
-/** One subscription's numbers. [nanos] is handler time measured while timing was on, 0 otherwise. */
-class SubscriptionStats(
+/**
+ * One subscription's numbers. [nanos] is handler time measured while timing was on, 0 otherwise; [slow] counts the
+ * calls that took 1 ms or more while timing was on. [label] is its diagnostics label, if any.
+ */
+class SubscriptionStats @JvmOverloads constructor(
     val id: String,
     val owner: String,
     val kind: String,
     val calls: Long,
     val errors: Long,
     val nanos: Long,
+    val label: String? = null,
+    val slow: Long = 0,
 ) {
-    override fun toString(): String = "SubscriptionStats($id, calls=$calls, errors=$errors, nanos=$nanos)"
+    override fun toString(): String =
+        "SubscriptionStats($id, label=$label, calls=$calls, errors=$errors, nanos=$nanos, slow=$slow)"
 }

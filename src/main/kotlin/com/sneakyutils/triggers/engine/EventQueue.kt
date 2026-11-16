@@ -39,8 +39,21 @@ internal interface EngineSink {
      */
     fun eventsDropped(count: Int, lastSubject: Any?)
 
-    /** A drain with events is about to deliver (once per drain, never on the no-op path). */
-    fun beforeDelivery() {}
+    /**
+     * A drain with events is about to deliver (once per drain, never on the no-op path). Returns a token for
+     * [afterDelivery] (a diagnostics section, 0 for none).
+     */
+    fun beforeDelivery(): Long = 0L
+
+    /** The drain that [beforeDelivery] returned [token] for has ended (also when a handler threw past the guard). */
+    fun afterDelivery(token: Long) {}
+
+    /**
+     * A step, area-step or block event for [subject] (an [AreaReg] or a [Watch]) was skipped because that
+     * subscription's own handler caused it ([EventQueue] re-entry rule). [kind] is the [EventQueue] event kind.
+     * Rare path: diagnostics only.
+     */
+    fun selfSkipped(subject: Any, kind: Int) {}
 }
 
 /**
@@ -230,8 +243,9 @@ internal class EventQueue(private val sink: EngineSink, private val maxPerDrain:
     fun drain() {
         if (draining || head == tail) return
         draining = true
-        sink.beforeDelivery()
+        var token = 0L
         try {
+            token = sink.beforeDelivery()
             var delivered = 0
             while (head < tail && !closed) {
                 if (delivered == maxPerDrain) {
@@ -249,6 +263,7 @@ internal class EventQueue(private val sink: EngineSink, private val maxPerDrain:
             discard()
             clearLog()
             draining = false
+            sink.afterDelivery(token)
         }
     }
 
@@ -288,6 +303,7 @@ internal class EventQueue(private val sink: EngineSink, private val maxPerDrain:
         if (!deliverable) return
         if (kind >= AREA_STEP && causedBy >= 0 && causedBySelf(causedBy, subject, s.uuid)) {
             selfTriggerDrops++
+            sink.selfSkipped(subject, kind)
             return
         }
         currentCause = log(subject, s.uuid, causedBy)

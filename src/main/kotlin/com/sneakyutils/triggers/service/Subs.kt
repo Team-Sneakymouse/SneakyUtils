@@ -18,6 +18,8 @@ internal abstract class SubBase(
     @JvmField val service: TriggerService,
     final override val owner: Plugin,
     @JvmField val kind: String,
+    /** Diagnostics label (validated by the options or the labelled view), or null. */
+    final override val label: String?,
 ) : Subscription {
     final override val id: String = "${owner.name}:$kind#${service.nextSequence()}"
 
@@ -30,12 +32,29 @@ internal abstract class SubBase(
     /** Handler nanoseconds measured while timing was on. */
     @JvmField var nanos = 0L
 
+    /** Calls of [TriggerService.SLOW_HANDLER_NANOS] or more, measured while timing was on. */
+    @JvmField var slow = 0L
+
+    /** Calls measured while timing was on: what [nanos] is the time of. */
+    @JvmField var timedCalls = 0L
+
     // Error log rate limit: one report a minute, counting the ones suppressed in between.
     @JvmField var lastErrorLogMillis = Long.MIN_VALUE
     @JvmField var suppressedErrors = 0L
 
-    /** SneakyDiagnostics section name: a fixed label per owner and kind (never per subscription). */
-    @JvmField val probeSection: String = "sub.${owner.name.lowercase(Locale.ROOT)}.$kind"
+    /** Owner name as it appears in diagnostics names. */
+    @JvmField val ownerKey: String = owner.name.lowercase(Locale.ROOT)
+
+    // Diagnostics names resolved for one capture (TriggerDiagnostics.name): allocated on the first timed call of a
+    // capture, never outside one.
+    @JvmField var diagEpoch = -1L
+    @JvmField var diagNames: Array<String?>? = null
+
+    /**
+     * What a handler call of callback [cb] is called in diagnostics: the kind for most subscriptions; an area's
+     * enter, exit, step and predicate separately. [CB_ANY] is the kind.
+     */
+    open fun callbackName(cb: Int): String = kind
 
     final override val active: Boolean get() = !closed
 
@@ -70,18 +89,45 @@ internal abstract class SubBase(
     /** Detach from the engine/index. [silent]: fire nothing and drop queued events. */
     protected abstract fun release(silent: Boolean)
 
-    override fun toString(): String = "$id${if (closed) " (closed)" else ""}"
+    override fun toString(): String = id + (if (label != null) " [$label]" else "") + (if (closed) " (closed)" else "")
+
+    companion object {
+        // Callbacks, for diagnostics names. Most subscriptions have one (CB_MAIN).
+        const val CB_MAIN = 0
+        const val CB_ENTER = 0
+        const val CB_EXIT = 1
+        const val CB_STEP = 2
+        const val CB_PREDICATE = 3
+
+        /** The subscription as a whole (its kind), for what isn't one callback's (dropped events). */
+        const val CB_ANY = 4
+        const val CALLBACKS = 5
+    }
 }
 
-internal class AreaSub(service: TriggerService, owner: Plugin, @JvmField val reg: AreaReg, @JvmField val handler: AreaHandler) :
-    SubBase(service, owner, KIND) {
+internal class AreaSub(
+    service: TriggerService,
+    owner: Plugin,
+    @JvmField val reg: AreaReg,
+    @JvmField val handler: AreaHandler,
+) : SubBase(service, owner, KIND, reg.options.label) {
     init {
         reg.link = this
     }
 
+    override fun callbackName(cb: Int): String = when (cb) {
+        CB_ENTER -> "area-enter"
+        CB_EXIT -> "area-exit"
+        CB_STEP -> "area-step"
+        CB_PREDICATE -> "area-predicate"
+        else -> KIND
+    }
+
     override fun checkRelease() = service.core.checkMutable("close an area")
 
-    override fun release(silent: Boolean) = service.core.removeArea(reg, silent)
+    override fun release(silent: Boolean) {
+        service.stage(TriggerService.STAGE_INDEX, "area-index.remove") { service.core.removeArea(reg, silent) }
+    }
 
     companion object {
         const val KIND = "area"
@@ -89,7 +135,7 @@ internal class AreaSub(service: TriggerService, owner: Plugin, @JvmField val reg
 }
 
 internal class WatchSub(service: TriggerService, owner: Plugin, kind: String, @JvmField val watch: Watch) :
-    SubBase(service, owner, kind) {
+    SubBase(service, owner, kind, watch.options.label) {
     init {
         watch.link = this
     }

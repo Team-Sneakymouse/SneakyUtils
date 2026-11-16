@@ -247,21 +247,117 @@ Clicks with 10,000 registered blocks: 30 ns a miss. See `EngineCostTest` and `Se
   own state on the next tick either way.)
 - Don't call into the service from an area predicate; don't keep `Player` references from handlers past quit.
 - Don't call any method off the server thread, including `close()`.
-- Don't put player names, UUIDs or free text in anything that ends up in a diagnostics label; SneakyUtils builds its
-  own labels from your plugin name and the subscription kind.
+- Don't put player names, UUIDs, locations or other varying text in a diagnostics label (see Diagnostics): a label
+  names a job, not an instance.
 
 ## Diagnostics
 
+### `/triggers`
+
 - `/triggers [stats|top|profile on|off]` (permission `sneakyutils.command.triggers`, op): subscriptions per kind and
   owner, areas and chunk entries, players tracked and riding, flagged all-online timers, the always-on counters, the
-  top subscriptions by calls and time, and handler profiling without a capture (`profile on` resets the times).
-  `stats` also prints warnings for layouts that make events expensive: a chunk listing over 256 areas, a player with
-  over 16 watches, over 64 subscriptions on one block, block type or entity type, and dropped events or failing
-  handlers and predicates. The first time a chunk passes 256 areas, the console gets a warning naming the plugin.
-- With [SneakyDiagnostics](https://github.com/Team-Sneakymouse/SneakyDiagnostics) installed (optional),
-  `/diagnostics plugins start 30 SneakyUtils` records, as instrumentation `sneakyutils-ticks-1`: sections `tick`,
-  `tick.mounted-poll`, `tick.timers` and `sub.<owner>.<kind>` per handler call; counts (the always-on counters, once a
-  second) such as `steps`, `steps.noop`, `events.move`, `area.enters`, `handler.calls`; levels `players.tracked`,
-  `players.riding`, `areas`, `areas.chunks`, `timers`, `timers.per-player`, `timers.all-online`, `subscriptions`.
-  Nothing is timed outside a capture or profile, and a block step with nothing to do makes no probe call.
+  top subscriptions by calls and time (with their labels and calls of 1 ms or more), and handler profiling without a
+  capture (`profile on` resets the times). `stats` also prints warnings for layouts that make events expensive: a chunk
+  listing over 256 areas, a player with over 16 watches, over 64 subscriptions on one block, block type or entity type,
+  and dropped events or failing handlers and predicates. The first time a chunk passes 256 areas, the console gets a
+  warning naming the plugin.
 - `Triggers.stats()` returns the same numbers for tests and other plugins.
+
+### Labelling your subscriptions
+
+Every handler runs inside SneakyUtils' listeners and tasks, so a profiler, or SneakyDiagnostics' scheduler and listener
+probes, put its cost on SneakyUtils. SneakyUtils' own capture splits it again by owner plugin, callback and **label**.
+Give each job its own label so a capture names it:
+
+```kotlin
+val triggers = SneakyUtils.getTriggers().labelled("myplugin:forge")      // every subscription made through it
+triggers.area(this, forge, handler)                                       // -> label myplugin:forge
+triggers.area(this, pad, padHandler, AreaOptions.builder().label("myplugin:forge-pad").build()) // options win
+SneakyUtils.getTriggers().every(this, 20, task, TimerOptions.builder().label("myplugin:cleanup").build())
+```
+
+- Every options type (`AreaOptions`, `WatchOptions`, `PlayerTimerOptions`, `ClickOptions`, `BreakOptions`,
+  `TimerOptions` for `every`) has `.label(...)`. `Triggers.labelled(label)` returns a view that labels everything
+  made through it whose options have no label; keep one per feature. `loadTable` through a view is not labelled.
+- A label is 1 to 64 characters of `a-z 0-9 . _ : -`, starting with a letter or digit (`TriggerLabels`); anything else
+  throws `IllegalArgumentException`. Prefix it with your plugin or feature (`holdover:forge-bellow`).
+- A label names a **job, not an instance**: the same on every start, shared by all subscriptions that do the same
+  thing (a rule's 200 areas share one label). Never a player, UUID, location or counter: a capture holds at most 256
+  names, and per-instance labels would only fold together (below).
+- Unlabelled subscriptions are still attributed to their owner and callback; the label only splits them further.
+  `Subscription.label` and `SubscriptionStats.label` read it back.
+
+### What a capture records
+
+With [SneakyDiagnostics](https://github.com/Team-Sneakymouse/SneakyDiagnostics) installed (optional),
+`/diagnostics plugins start 30 SneakyUtils` (or `/diagnostics all start`) writes `plugins-sneakyutils-1.json`,
+instrumentation `sneakyutils-ticks-2`, in the shared `sneakydiagnostics.probe/1` shape (see SneakyDiagnostics'
+`docs/report-schema-v2.md`: calls, total and self nanoseconds, percentiles, the 10 slowest calls, per-second series).
+
+**Sections** (server-thread wall time; strictly nested, so `selfNanos` adds up):
+
+| Section | What |
+|---|---|
+| `handler.<owner>.<callback>[.<label>]` | one subscription's handler calls; `<owner>` is the plugin name in lower case, `<callback>` is `area-enter`, `area-exit`, `area-step`, `step-watch`, `block-under`, `block-watch`, `timer`, `player-timer`, `player-timer-all-online`, `block-click`, `block-type`, `block-break`, `block-break-type` or `entity-click` |
+| `move` | a PlayerMoveEvent that changed block: area lookup, watch checks and (nested) the delivery |
+| `teleport` | a teleport (including riders moved by teleport and dismounts) |
+| `player-state` | join, quit, death, respawn, world change, game mode change |
+| `riding`, `resync` | the next-tick re-reads after (dis)mounts and nested teleports |
+| `drain` | delivering one event's queued enters, exits and steps; its self time is the queue's own cost |
+| `tick`, `tick.mounted-poll`, `tick.timers` | the 1-tick ticker: riders polled, timers run |
+| `click.block`, `click.break`, `click.entity` | a click, break or entity click that matched subscriptions |
+| `area-index.add`, `area-index.remove` | registering and closing areas (index updates, `fireOnRegister` enters nested) |
+| `handler.other` | handler calls past the name budget (below) |
+
+A handler's section is nested in the stage that delivered it, so a stage's `selfNanos` is SneakyUtils' own cost and
+the `handler.*` rows are the subscribers'. Handler sections from one plugin add up to what that plugin's subscriptions
+cost, wherever they ran.
+
+**Counts:** the always-on counters, once a second as the change since the last second (`events.move`, `steps`,
+`steps.noop`, `area.enters`, `area.exits`, `handler.calls`, `handler.errors`, `handler.slow`, `queue.dropped`,
+`queue.self-triggered`, `reentrant.dropped`, `predicate.errors`, ...); and per subscriber, under the handler's name:
+`handler.errors.<owner>.<callback>[.<label>]` (a throw; `area-predicate` for a custom area's predicate),
+`handler.slow.<...>` (a call of 1 ms or more), `handler.self-skipped.<...>` (calls skipped because that subscription's
+own handler caused them), `queue.dropped.after.<owner>.<kind>[.<label>]` (events dropped by the loop limit, after
+that subscription's handler ran last). `diagnostics.names-folded` counts names folded by the budget.
+
+**Levels** (once a second): `players.tracked`, `players.riding`, `players.watched`, `areas`, `areas.chunks`,
+`timers`, `timers.per-player`, `timers.per-player.players`, `timers.all-online`, `subscriptions`,
+`subscriptions.by-kind.<kind>`, `subscriptions.by-owner.<owner>.<kind>` (the first 200 pairs of the capture; the rest
+in `subscriptions.by-owner.other`).
+
+**Name budget.** The probe keeps at most 256 names per kind. SneakyUtils admits the first 192 handler section names of
+a capture as they are; later ones fold into `handler.<owner>.<callback>` (the label dropped), and past 224 into
+`handler.other`. Counts do the same (160, then 200, then `handler.errors.other` and so on). Each fold adds to
+`diagnostics.names-folded`, so a report with folded names says so; it stays `complete`. If it is non-zero, use fewer,
+broader labels.
+
+**Cost.** Nothing is timed, counted or allocated outside a capture or `/triggers profile on`: each move, drain, tick
+and click reads one field, and a drain, tick or matched click asks the probe once whether a capture runs (an
+interface call; a null check without SneakyDiagnostics), never once per handler. `DiagnosticsCostTest` measures it:
+1,000,000 block steps with 250,000 labelled handler calls allocate nothing and cost the same with SneakyDiagnostics
+installed and idle as without it. During a capture each handler call costs two clock reads and a probe section
+(about 40 ns in SneakyDiagnostics' recorder). A capture that begins shows handlers from the first event that delivers
+something, and stages from then on (at the latest a second later).
+
+### Reading a capture
+
+1. Open `plugins-1.json` in the capture folder and follow SneakyUtils' `file` entry. Check `complete`,
+   `measurements.omittedKeys` and `measurements.nestingErrors` (all should be clean), and
+   `counts["diagnostics.names-folded"]`.
+2. **Which plugin or job is slow:** sort `sections` by `selfNanos`. `handler.<owner>.*` rows are subscribers' time;
+   sum them per owner for a plugin's total. `meanNanos` and `p99Nanos` show whether it is every call or a few.
+3. **Single slow calls:** `slowest` lists the 10 longest calls with their section (owner, callback, label) and when
+   (`atMillis`, `atTick`); `handler.slow.*` counts every call of 1 ms or more.
+4. **Firing far more than expected:** a handler row's `calls` against what the feature should do (an area entered
+   once per visit, a timer `capture seconds x 20 / interval` times); the per-second `series` (for the 16 most
+   expensive sections) shows bursts. `subscriptions.by-owner.*` levels show subscriptions piling up (a leak looks like
+   a level that only grows).
+5. **Failing handlers:** `handler.errors.<owner>.<callback>[.<label>]`; the server log has the stack trace (once a
+   minute per subscription, with its id; `/triggers top` maps ids to labels).
+6. **SneakyUtils itself:** the stage rows' `selfNanos` (`move`, `drain`, `tick.mounted-poll`, ...). SneakyDiagnostics'
+   own scheduler and listener probes (Ignite) still list SneakyUtils as the owner of this time; this report is what
+   splits it.
+
+SneakyDiagnostics may be missing, installed later, reloaded or removed: SneakyUtils keeps working, unmeasured while it
+is absent, and measures (and samples) again when its service comes back (`integration/Probe.java`, the shared shim).

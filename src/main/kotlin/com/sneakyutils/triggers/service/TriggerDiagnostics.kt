@@ -105,8 +105,8 @@ internal class TriggerDiagnostics(private val probe: Probe?) {
         private val PREFIXES = arrayOf("handler", "handler.errors", "handler.slow", "handler.self-skipped", "queue.dropped.after")
 
         /**
-         * Section budget for handler names. The engine has 14 fixed sections and `handler.other` is the overflow:
-         * 14 + 224 + 1 stays under the probe's 256.
+         * Section budget for handler names. The engine has 15 fixed sections and `handler.other` is the overflow:
+         * 15 + 224 + 1 stays under the probe's 256.
          */
         const val SECTION_PRIMARY = 192
         const val SECTION_CAP = 224

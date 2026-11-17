@@ -189,6 +189,7 @@ class ApiTypesTest {
             fake.everyForPlayers(owner, 5, { }, PlayerTimerOptions.builder().skipDead(false).build())
         }
         assertEquals(listOf("break", "break type", "timer ADDED"), fake.calls, "options it can't honour are refused, not ignored")
+        assertThrows(UnsupportedOperationException::class.java) { fake.onBlockRemoved(owner, key, { _, _, _ -> }) }
         assertTrue(fake.stats().warnings.isEmpty())
     }
 }

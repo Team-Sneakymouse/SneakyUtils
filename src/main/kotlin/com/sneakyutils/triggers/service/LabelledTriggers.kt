@@ -8,6 +8,8 @@ import com.sneakyutils.triggers.BlockBreakHandler
 import com.sneakyutils.triggers.BlockClickHandler
 import com.sneakyutils.triggers.BlockKey
 import com.sneakyutils.triggers.BlockOffset
+import com.sneakyutils.triggers.BlockRemovedHandler
+import com.sneakyutils.triggers.BlockRemovedOptions
 import com.sneakyutils.triggers.BlockUnderHandler
 import com.sneakyutils.triggers.BlockWatchHandler
 import com.sneakyutils.triggers.BreakOptions
@@ -42,12 +44,14 @@ internal class LabelledTriggers(private val service: TriggerService, private val
     private val timerDefault = TimerOptions.DEFAULT.toBuilder().label(label).build()
     private val clickDefault = ClickOptions.DEFAULT.toBuilder().label(label).build()
     private val breakDefault = BreakOptions.DEFAULT.toBuilder().label(label).build()
+    private val removedDefault = BlockRemovedOptions.DEFAULT.toBuilder().label(label).build()
 
     private fun l(o: AreaOptions) = if (o.label != null) o else if (o === AreaOptions.DEFAULT) areaDefault else o.toBuilder().label(label).build()
     private fun l(o: WatchOptions) = if (o.label != null) o else if (o === WatchOptions.DEFAULT) watchDefault else o.toBuilder().label(label).build()
     private fun l(o: TimerOptions) = if (o.label != null) o else timerDefault
     private fun l(o: ClickOptions) = if (o.label != null) o else if (o === ClickOptions.DEFAULT) clickDefault else o.toBuilder().label(label).build()
     private fun l(o: BreakOptions) = if (o.label != null) o else if (o === BreakOptions.DEFAULT) breakDefault else o.toBuilder().label(label).build()
+    private fun l(o: BlockRemovedOptions) = if (o.label != null) o else removedDefault
     private fun l(o: PlayerTimerOptions) = if (o.label != null) o else o.toBuilder().label(label).build()
 
     override fun area(owner: Plugin, area: Area, handler: AreaHandler, options: AreaOptions): Subscription =
@@ -102,6 +106,12 @@ internal class LabelledTriggers(private val service: TriggerService, private val
 
     override fun onBlockBreakType(owner: Plugin, material: Material, handler: BlockBreakHandler, options: BreakOptions): Subscription =
         service.onBlockBreakType(owner, material, handler, l(options))
+
+    override fun onBlockRemoved(owner: Plugin, block: BlockKey, handler: BlockRemovedHandler): Subscription =
+        service.onBlockRemoved(owner, block, handler, removedDefault)
+
+    override fun onBlockRemoved(owner: Plugin, block: BlockKey, handler: BlockRemovedHandler, options: BlockRemovedOptions): Subscription =
+        service.onBlockRemoved(owner, block, handler, l(options))
 
     override fun onEntityClick(owner: Plugin, match: EntityMatch, handler: EntityClickHandler, options: ClickOptions): Subscription =
         service.onEntityClick(owner, match, handler, l(options))

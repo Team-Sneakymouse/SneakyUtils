@@ -167,6 +167,114 @@ triggers.onEntityClick(this, EntityMatch.scoreboardTag("vendor").withType(Entity
   break, later break handlers with the default don't see it. `BreakOptions.builder().ignoreCancelled(false)` also
   delivers cancelled breaks (a protection plugin's, or an earlier handler's): check `event.isCancelled` in the handler.
 
+### Block removal
+
+Furniture and devices anchored to a block hear when that block goes, whatever removes it, without sweeps or timers:
+
+```kotlin
+val anchor = triggers.onBlockRemoved(this, BlockKey.of(supportBlock)) { block, cause, event -> tv.unmount(block) }
+```
+
+```java
+Subscription anchor = triggers.onBlockRemoved(plugin, BlockKey.of(supportBlock),
+    (block, cause, event) -> tv.unmount(block),
+    BlockRemovedOptions.builder().label("myplugin:tv-anchor").build());
+```
+
+Each removal is reported once, by the event that decides it (read against Paper 26.2's server code):
+
+| Cause | Event (Paper 26.2) | When |
+|---|---|---|
+| `BREAK` | `BlockBreakEvent` | a player breaks it (not a spectator, and a game-master block such as a command or structure block only when Paper lets that player break it) |
+| `EXPLODE` | `BlockExplodeEvent`, `EntityExplodeEvent`; `TNTPrimeEvent` (`EXPLOSION`) | it is in the explosion's `blockList()`, for explosions that destroy blocks (`DESTROY`, `DESTROY_WITH_DECAY`; not a wind charge's `TRIGGER_BLOCK`), and is a block an explosion can destroy (not bedrock, barrier, end portal frame, end portal, end gateway, command, structure or jigsaw blocks); or it is the bed half that was used or the respawn anchor that exploded itself; or it is TNT the explosion primes; or an ender dragon flies through it |
+| `BURN` | `BlockBurnEvent`; Paper's old `TNTPrimeEvent` (`FIRE`) | fire burns it, or primes it (TNT; by then fire may already stand in its place) |
+| `FADE` | `BlockFadeEvent` | it fades, melts or turns into another block (snow, ice, fire burning out, coral dying, grass or farmland to dirt) |
+| `DECAY` | `LeavesDecayEvent` | leaves decay |
+| `PISTON` | `BlockPistonExtendEvent`, `BlockPistonRetractEvent` | a piston moves it away from this position, or breaks it (Paper's `getBlocks()` lists both, at their original positions); or it is the head of a retracting piston (reported even when a sticky pull is cancelled: Paper clears the head before that event and doesn't put it back) |
+| `DESTROY` | Paper's `BlockDestroyEvent` | the server destroys it: losing its support (a torch, sign or carpet), `/setblock ... destroy`, and entity breaks that go through the server's destroy (wither, ravager, villager harvesting, sheep eating short grass, rabbit, silverfish, boat on a lily pad, projectile on a chorus flower, pot or dripstone, trampled crops or turtle eggs); and, on the next tick, a watched rail, redstone wire, repeater or comparator whose support another reported event took away (see below) |
+| `ENTITY` | `EntityChangeBlockEvent`; `TNTPrimeEvent` (`PROJECTILE`) | an entity changes it directly: turns it into another type (sheep eating a grass block, trampled farmland, silverfish infesting stone, a falling block landing on grass), or removes it itself (an enderman, sand or gravel starting to fall, eating the last slice of cake); or a burning projectile primes it (TNT) |
+| `FLUID` | `BlockFromToEvent`, `FluidLevelChangeEvent` | flowing water or lava washes it away (the target isn't air, a fluid or waterloggable); or it is a fluid that recedes or turns into another block (a level change within the same fluid doesn't count) |
+| `PRIME` | `TNTPrimeEvent` (`REDSTONE`, `PLAYER`, `DISPENSER`) | TNT is lit and turns into primed TNT |
+| `TELEPORT` | `BlockFromToEvent` (face `SELF`) | a dragon egg teleports away |
+| `SPREAD` | `BlockSpreadEvent` | something spreads onto it and turns it into another block (sculk over stone, grass or mycelium over dirt) |
+| `REPLACE` | `BlockPlaceEvent`, `BlockMultiPlaceEvent` | a player places another block in its position (a block into short grass, a door over flowers), accepted and with `canBuild()`; the world already holds the new block when the handler runs, the old one is the event's replaced state |
+| `FORM` | `BlockFormEvent` (and `EntityBlockFormEvent`) | a block forms in its place: concrete powder hardening, lava turning to obsidian or cobblestone, water turning to stone or freezing, frost walker ice (not copper weathering; concrete powder placed straight into water is `REPLACE`) |
+| `ABSORB` | `SpongeAbsorbEvent` | a sponge soaks it up (water, water plants); a block that only loses its water stays and isn't reported |
+| `BUCKET` | `PlayerBucketFillEvent` | a player scoops it up with a bucket: a water or lava source, powder snow or a bubble column (a waterlogged block only loses its water and isn't reported) |
+
+- **Timing.** Every event is observed at `MONITOR` with `ignoreCancelled`, so a cancelled event is never delivered and
+  the removal is certain. The handler runs before the event is applied: `block` still holds the old block (except for
+  `REPLACE`, which Paper applies before its event, and for a bed or respawn anchor exploding by itself, which Paper
+  removes before its `BlockExplodeEvent`, and fire-primed TNT that fire has already replaced; those last are delivered
+  even when their event is cancelled, since they are gone either way). Read the event; never cancel or change it.
+- **The deciding event.** Where Paper fires two events for one removal, the later, deciding one reports it: an entity
+  break that goes on to the server's destroy comes as `DESTROY` (a protection plugin cancelling the `BlockDestroyEvent`
+  keeps the block, and nothing is reported), not from its `EntityChangeBlockEvent`; TNT comes from its `TNTPrimeEvent`,
+  not from the explosion list, `BlockBurnEvent` or projectile that set it off, so TNT whose priming is cancelled and
+  stays is never reported; for fire that is Paper's old `TNTPrimeEvent`, which fires after the Bukkit one and can still
+  keep it. TNT broken by a player is `BREAK` (its `BLOCK_BREAK` priming is not reported again). An ender dragon at its
+  default yield of 0 removes everything its `EntityExplodeEvent` lists, TNT included; when a plugin changes that yield,
+  Paper's old `TNTPrimeEvent` (`EXPLOSION`) decides each listed block and reports it. A break Paper refuses after the
+  `BlockBreakEvent` (a spectator, or a game-master block without creative and op, or a command block without
+  creative and `minecraft.commandblock`) is not reported; op stands in for Minecraft's permission level 2.
+- **Once per watched block per event.** An explosion or piston that removes several watched blocks calls each of their
+  subscriptions once, in the event's order; a position the event lists twice is delivered once, at its first place.
+  A subscription also gets at most one delivery of a cause per server tick: Paper can report one removal twice in a
+  tick (a sponge placed with `Block.setType(SPONGE, true)` into still water fires two `SpongeAbsorbEvent`s with the
+  same positions), and the second is dropped. A different cause in the same tick still comes.
+  Explosion list entries count by their coordinates in the explosion's world, as Paper applies them (a plugin may add
+  a block object of another world); air in a list is skipped. Paper's `isDestroyable` keeps bedrock, barriers, end
+  portal frames, end portals, end gateways, command, structure and jigsaw blocks even when a plugin lists them, so
+  those aren't reported (an ender dragon removes what it lists without that check; assumes Paper's unsupported setting
+  `allow-permanent-block-break-exploits` is off).
+- **Blocks that drop without an event.** Paper 26.2's rails (all four kinds) remove themselves in `neighborChanged`
+  (`dropResources` + `removeBlock`) when their support goes, with no event at all. Redstone wire, repeaters and
+  comparators do the same when the neighbour update reaches them first (their support broken or blown up); when the
+  shape update comes first (a piston moving the support) they go through the server's destroy and fire
+  `BlockDestroyEvent` instead (checked on a live Paper 26.2 server). Every other support-dependent block (torches,
+  signs, carpets, buttons, levers, pressure plates, doors, beds, plants) goes through the server's destroy and comes as
+  `DESTROY` at once. So when a reported event (any cause above) takes a block away (for an explosion: only the
+  targets it really destroys, not TNT left to its prime event or the blocks Paper protects), the watched blocks that
+  rest on it are queued for a check on the next tick: a rail, wire, repeater or comparator just above it, and a rail beside it
+  that ascends towards it (an ascending rail also rests on its uphill side; its shape says which). If one has changed
+  by then it is reported as `DESTROY` with the event that took its support, to the subscriptions that were watching
+  when that happened (closed ones are skipped, newer ones wait for the next removal). The block is already gone when
+  that handler runs, and the event is the support's (a `BlockBreakEvent`, an explosion...). A block its own event
+  reported meanwhile (a `BlockDestroyEvent`, an explosion listing both) isn't reported again, and when two events in a
+  tick take supports of the same rail, the first one is reported. Not covered: a support removed without an event
+  (`setType`, WorldEdit), so the rail on it isn't reported either. There are no chains to follow: none of those four
+  can rest on another of them.
+- **Two reports for one spot.** A block burnt away (`BURN`) usually becomes fire, and that fire burning out later is a
+  `FADE` at the same position; likewise anything that later replaces what took a block's place. Close the subscription
+  in the first call (the usual pattern for an anchor) and the rest never reaches you.
+- **Only the position you watch.** The other half of a door, bed or tall plant is another block; watch both if both
+  matter. An exploding bed reports only the half that was used: Paper removes the other half before the event only
+  when it is the matching half, and nothing left at the event shows whether it was, so that half isn't reported. A
+  sticky piston whose pull can't move its blocks loses its head with no event at all; that head isn't reported either.
+  Changes plugins make without an event (`setType`, `breakNaturally`, WorldEdit) are not reported, nor is a bed or
+  anchor exploding with `mobGriefing` off (Paper fires no event then).
+  Also not reported: a dispenser scooping a source up with a bucket (its event is the dispense, before the pickup is
+  decided) and a hoe tilling grass or dirt (no event of its own). Other item uses that change a block (stripping a log,
+  making a path, brushing suspicious sand) fire `EntityChangeBlockEvent` and come as `ENTITY`. A rail on TNT that fire
+  primes may drop before Paper's old `TNTPrimeEvent(FIRE)` queues its check, so that rail isn't reported.
+- **Not used:** `BlockPhysicsEvent` (far too frequent; a block losing its support comes as `DESTROY`), and Paper's
+  `BlockBreakBlockEvent` (not cancellable; the piston and fluid breaks it reports come from the events above). Paper's
+  old `com.destroystokyo` `TNTPrimeEvent` (deprecated for removal) is used for the two paths it still decides:
+  fire-primed TNT and a dragon at a changed yield. Listening to it makes Paper log a deprecation warning when the first
+  removal watch is made ("... has registered a listener for com.destroystokyo.paper.event.block.TNTPrimeEvent ...");
+  that is expected, and needed until Paper stops deciding those paths with it. If Paper drops it, those are reported
+  from the events before it (the Bukkit `TNTPrimeEvent(FIRE)` and the dragon's `EntityExplodeEvent`) and a cancelled
+  old event can't be seen.
+- **Cost.** SneakyUtils listens to these events only once something has subscribed. Then an event costs one lookup per
+  block it touches (an explosion looks up each block in its list; a retracting piston also its head, found from the
+  base's own facing), plus five for the positions that may rest on each block it takes away (the next-tick check
+  above); a neighbour's type and shape are read only when it is watched. One world lookup comes first, and nothing at all happens when the
+  world has no watched blocks. `BlockFromToEvent` fires for every fluid flow, so this is one lookup per flow while
+  any removal is watched in that world. `/triggers stats` counts `events.block-removed`, `block-removed.lookups`,
+  `block-removed.neighbour-checks` and `block-removed.neighbour-removals`. Same rules as the other indexes: server
+  thread only, errors contained, subscribing or closing inside a handler takes effect from the next event (an event
+  that removes several positions looks them all up first), owner disable and world unload close the subscriptions.
+
 ## Data tables
 
 Content such as city buttons and forge areas can live in a YAML file, with each entry naming an action your plugin
@@ -258,7 +366,8 @@ Clicks with 10,000 registered blocks: 30 ns a miss. See `EngineCostTest` and `Se
   owner, areas and chunk entries, players tracked and riding, flagged all-online timers, the always-on counters, the
   top subscriptions by calls and time (with their labels and calls of 1 ms or more), and handler profiling without a
   capture (`profile on` resets the times). `stats` also prints warnings for layouts that make events expensive: a chunk
-  listing over 256 areas, a player with over 16 watches, over 64 subscriptions on one block, block type or entity type,
+  listing over 256 areas, a player with over 16 watches, over 64 subscriptions on one block, block type or entity type
+  (clicks, breaks and removal watches),
   and dropped events or failing handlers and predicates. The first time a chunk passes 256 areas, the console gets a
   warning naming the plugin.
 - `Triggers.stats()` returns the same numbers for tests and other plugins.
@@ -277,7 +386,7 @@ SneakyUtils.getTriggers().every(this, 20, task, TimerOptions.builder().label("my
 ```
 
 - Every options type (`AreaOptions`, `WatchOptions`, `PlayerTimerOptions`, `ClickOptions`, `BreakOptions`,
-  `TimerOptions` for `every`) has `.label(...)`. `Triggers.labelled(label)` returns a view that labels everything
+  `BlockRemovedOptions`, `TimerOptions` for `every`) has `.label(...)`. `Triggers.labelled(label)` returns a view that labels everything
   made through it whose options have no label; keep one per feature. `loadTable` through a view is not labelled.
 - A label is 1 to 64 characters of `a-z 0-9 . _ : -`, starting with a letter or digit (`TriggerLabels`); anything else
   throws `IllegalArgumentException`. Prefix it with your plugin or feature (`holdover:forge-bellow`).
@@ -298,7 +407,7 @@ instrumentation `sneakyutils-ticks-2`, in the shared `sneakydiagnostics.probe/1`
 
 | Section | What |
 |---|---|
-| `handler.<owner>.<callback>[.<label>]` | one subscription's handler calls; `<owner>` is the plugin name in lower case, `<callback>` is `area-enter`, `area-exit`, `area-step`, `step-watch`, `block-under`, `block-watch`, `timer`, `player-timer`, `player-timer-all-online`, `block-click`, `block-type`, `block-break`, `block-break-type` or `entity-click` |
+| `handler.<owner>.<callback>[.<label>]` | one subscription's handler calls; `<owner>` is the plugin name in lower case, `<callback>` is `area-enter`, `area-exit`, `area-step`, `step-watch`, `block-under`, `block-watch`, `timer`, `player-timer`, `player-timer-all-online`, `block-click`, `block-type`, `block-break`, `block-break-type`, `block-removed` or `entity-click` |
 | `move` | a PlayerMoveEvent that changed block: area lookup, watch checks and (nested) the delivery |
 | `teleport` | a teleport (including riders moved by teleport and dismounts) |
 | `player-state` | join, quit, death, respawn, world change, game mode change |
@@ -306,6 +415,7 @@ instrumentation `sneakyutils-ticks-2`, in the shared `sneakydiagnostics.probe/1`
 | `drain` | delivering one event's queued enters, exits and steps; its self time is the queue's own cost |
 | `tick`, `tick.mounted-poll`, `tick.timers` | the 1-tick ticker: riders polled, timers run |
 | `click.block`, `click.break`, `click.entity` | a click, break or entity click that matched subscriptions |
+| `block.removed` | a removal event that touched watched blocks (all of them, for an explosion or piston) |
 | `area-index.add`, `area-index.remove` | registering and closing areas (index updates, `fireOnRegister` enters nested) |
 | `handler.other` | handler calls past the name budget (below) |
 
@@ -315,7 +425,7 @@ cost, wherever they ran.
 
 **Counts:** the always-on counters, once a second as the change since the last second (`events.move`, `steps`,
 `steps.noop`, `area.enters`, `area.exits`, `handler.calls`, `handler.errors`, `handler.slow`, `queue.dropped`,
-`queue.self-triggered`, `reentrant.dropped`, `predicate.errors`, ...); and per subscriber, under the handler's name:
+`queue.self-triggered`, `reentrant.dropped`, `predicate.errors`, `events.block-removed`, `block-removed.lookups`, ...); and per subscriber, under the handler's name:
 `handler.errors.<owner>.<callback>[.<label>]` (a throw; `area-predicate` for a custom area's predicate),
 `handler.slow.<...>` (a call of 1 ms or more), `handler.self-skipped.<...>` (calls skipped because that subscription's
 own handler caused them), `queue.dropped.after.<owner>.<kind>[.<label>]` (events dropped by the loop limit, after

@@ -1,0 +1,12 @@
+# Read when SneakyUtils enables; restart the server to apply changes.
+player-util:
+  # PlayerUtil caches some PlaceholderAPI checks per player for this many server ticks (20 = one second).
+  # 0 turns a cache off: every call reads the placeholder, as before. Entries are also dropped on quit and on the
+  # events that change them, so a real change shows up at once when such an event fires and within these ticks
+  # otherwise.
+  # canTarget's CMI vanish check (the game mode is never cached). Dropped on CMI vanish/unvanish.
+  vanish-cache-ticks: 20
+  # onDuty (SneakyDispatch). Dropped on com.sneakyutils.signals.DutyChangedEvent.
+  duty-cache-ticks: 20
+  # characterId and getCharacterName (SneakyCharacterManager). Dropped on character load and rename.
+  character-cache-ticks: 20

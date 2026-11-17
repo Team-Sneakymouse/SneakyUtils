@@ -2,11 +2,11 @@ package net.sneakycharactermanager.paper.handlers.character
 
 import org.bukkit.entity.Player
 import org.bukkit.event.Cancellable
-import org.bukkit.event.Event
 import org.bukkit.event.HandlerList
+import org.bukkit.event.player.PlayerEvent
 
 /** Test-only API shape; no SCM runtime dependency is present. */
-class LoadCharacterEvent(val player: Player) : Event(), Cancellable {
+class LoadCharacterEvent(player: Player) : PlayerEvent(player), Cancellable {
     private var cancelled = false
     override fun isCancelled() = cancelled
     override fun setCancelled(value: Boolean) { cancelled = value }

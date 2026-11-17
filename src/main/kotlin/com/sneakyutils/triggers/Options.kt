@@ -208,6 +208,34 @@ class BreakOptions private constructor(b: Builder) {
 }
 
 /**
+ * Options for [Triggers.onBlockRemoved]. Immutable; build with [builder].
+ */
+class BlockRemovedOptions private constructor(b: Builder) {
+    /** Diagnostics label (see [TriggerLabels]); null: none. Default null. */
+    val label: String? = b.label
+
+    fun toBuilder(): Builder = Builder().label(label)
+
+    override fun toString(): String = "BlockRemovedOptions(label=$label)"
+
+    class Builder internal constructor() {
+        internal var label: String? = null
+
+        /** Diagnostics label; throws [IllegalArgumentException] unless null or valid ([TriggerLabels.check]). */
+        fun label(value: String?) = apply { label = TriggerLabels.check(value) }
+        fun build(): BlockRemovedOptions = BlockRemovedOptions(this)
+    }
+
+    companion object {
+        @JvmField
+        val DEFAULT: BlockRemovedOptions = Builder().build()
+
+        @JvmStatic
+        fun builder(): Builder = Builder()
+    }
+}
+
+/**
  * Options for block and entity clicks. Immutable; build with [builder].
  */
 class ClickOptions private constructor(b: Builder) {

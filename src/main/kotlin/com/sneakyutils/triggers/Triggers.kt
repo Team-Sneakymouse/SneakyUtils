@@ -151,6 +151,28 @@ interface Triggers {
         return onBlockBreakType(owner, material, handler)
     }
 
+    /**
+     * Calls [handler] when the block at [block] is about to be removed by anything the server reports with an event:
+     * a player breaking it, an explosion, fire, fading, leaf decay, a piston moving or breaking it, losing its support,
+     * an entity, flowing or receding fluid, TNT being primed, a dragon egg teleporting, something spreading onto it or
+     * a player placing a block in its place (see [BlockRemoveCause]). For furniture and devices anchored to a block: no
+     * sweeps or timers to notice the anchor is gone. [block] must be packable ([BlockKey.isPackable]).
+     *
+     * Each removal is reported by the event that decides it, observed at `MONITOR` and only when nobody cancelled it, so
+     * the removal is certain; the handler runs before the event is applied (the old block is still there, except an
+     * exploding bed or respawn anchor, and a placement that replaced it) and must not cancel or change the event. A
+     * position is delivered once per event. Changes plugins make without an event (`setType`, WorldEdit) are not
+     * reported.
+     *
+     * A default method, for implementations from before it: they throw [UnsupportedOperationException].
+     */
+    fun onBlockRemoved(owner: Plugin, block: BlockKey, handler: BlockRemovedHandler, options: BlockRemovedOptions): Subscription =
+        throw UnsupportedOperationException("this Triggers implementation can't watch block removal")
+
+    /** [onBlockRemoved] with default options. A default method. */
+    fun onBlockRemoved(owner: Plugin, block: BlockKey, handler: BlockRemovedHandler): Subscription =
+        onBlockRemoved(owner, block, handler, BlockRemovedOptions.DEFAULT)
+
     // ---- entities
 
     /** Clicks on entities that match [match]. */

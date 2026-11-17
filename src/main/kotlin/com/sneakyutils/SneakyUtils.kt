@@ -6,6 +6,7 @@ import com.sneakyutils.triggers.service.TriggersCommand
 import com.sneakyutils.triggers.service.TriggerService
 import com.sneakyutils.util.AlteredBlockListener
 import com.sneakyutils.util.AlteredBlockManager
+import com.sneakyutils.util.PlayerCheckCache
 import com.sneakyutils.util.PlayerConcealment
 import io.papermc.paper.plugin.lifecycle.event.types.LifecycleEvents
 import org.bukkit.plugin.java.JavaPlugin
@@ -84,6 +85,11 @@ open class SneakyUtils : JavaPlugin() {
         alteredBlockManager = AlteredBlockManager(this)
         server.pluginManager.registerEvents(AlteredBlockListener(), this)
         playerConcealment = PlayerConcealment(this).also { it.start() }
+        saveDefaultConfig()
+        PlayerCheckCache.active = PlayerCheckCache(this).also {
+            it.configure(config)
+            it.start()
+        }
         triggers = TriggerService(this, probe).also { it.start() }
         probe.hook()
         logger.info("SneakyUtils enabled.")
@@ -93,6 +99,8 @@ open class SneakyUtils : JavaPlugin() {
         probe.unhook()
         triggers?.shutdown()
         triggers = null
+        PlayerCheckCache.active?.shutdown()
+        PlayerCheckCache.active = null
         playerConcealment?.shutdown()
         playerConcealment = null
         alteredBlockManager?.restoreAll()

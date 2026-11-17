@@ -34,7 +34,7 @@ repositories {
     maven("https://repo.extendedclip.com/content/repositories/placeholderapi/")
     maven("https://repo.papermc.io/repository/maven-public/")
     // Team artifacts (SneakyDiagnostics-API) only.
-    maven("https://maven.sneakyrp.com/releases") {
+    maven("https://maven.sneakyrp.com/sneakymouse") {
         content { includeGroup("io.github.team-sneakymouse") }
     }
 }
@@ -159,7 +159,7 @@ publishing {
     repositories {
         maven {
             name = "sneakyrp"
-            url = uri("https://maven.sneakyrp.com/releases")
+            url = uri("https://maven.sneakyrp.com/sneakymouse")
             credentials(PasswordCredentials::class)
             authentication {
                 create<org.gradle.authentication.http.BasicAuthentication>("basic")

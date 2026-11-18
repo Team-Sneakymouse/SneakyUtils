@@ -27,6 +27,8 @@ class AlteredBlockListener : Listener {
         for (entity in ArrayList(entities)) {
             if (!entity.isValid) continue
             if (!entity.scoreboardTags.contains(SneakyUtils.ALTERED_BLOCK_TAG)) continue
+            // Its change was already undone while it was unloaded: remove it, don't restore again.
+            if (manager.discardRemovedMarker(entity)) continue
             val block = manager.getMarkedBlock(entity)
             if (block != null && manager.isTracked(block)) continue
             manager.restoreFromMarker(entity)

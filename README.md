@@ -104,6 +104,43 @@ add(Change, boolean applyPhysics, long durationTicks): void
   Explicit undo uses its own physics argument. Use the exact registered/returned
   `Change` instance, not a structurally equal copy; register each instance only once
   while active. Record components and existing method signatures are preserved.
+- Items of a block with an inventory (chests and other containers, chiseled bookshelves,
+  decorated pots, shelves, lecterns with their page) are saved from the captured
+  state's snapshot inventory and written back through a fresh state's snapshot inventory, so
+  undo, timed restore and crash recovery put them back. Other block-entity data is kept only
+  where `serializeTileData` lists it (signs, spawners, banners); furnace cook progress, campfire
+  items and brushable-block items, for example, are not. A jukebox's record is not saved or
+  emptied either (Paper drops it when the jukebox is replaced): on Paper, writing a record back
+  updates neighbours even with physics off.
+- Only `apply` takes over a block's inventory, only for the block's first change (the one whose
+  state the marker persists), only when it turns the block into another block type, and only
+  once Paper has accepted the block's recovery marker (spawned before anything else changes; if
+  an `EntitySpawnEvent` listener refuses it, the items are left to Paper, which drops them as
+  the block entity goes, and the change holds none). The change holds items exactly when apply
+  emptied them, so a physics callback that breaks the block during apply can't make it hold
+  items that already dropped. It empties the block's live inventory after capturing its state,
+  so Paper drops nothing on the ground (the
+  change holds the items and undo, timed restore or crash recovery puts them back, so they are
+  never duplicated). For one half of a double chest only that half's own inventory is emptied;
+  the other half keeps its items. Block-entity contents that are not saved (campfire items, a
+  brushable block's item, ...) are not emptied and drop or vanish as they would without the
+  manager.
+- `register` and `add` record an external edit, which already decided what became of the
+  inventory (dropped, kept, moved), so their changes never hold items: undo, timed restore and
+  crash recovery write back the BlockData and non-inventory tile data only, and a restored
+  container keeps whatever its block entity holds then (a fresh one is empty).
+- A change to the same block type (a chest turned to face east, via `apply` or an external edit
+  registered afterwards) keeps the block entity and its items and does not take the inventory:
+  its undo, timed restore and crash recovery write back the BlockData and saved non-inventory
+  data (a lectern's page, for example) and leave the live items as they are, so items taken out
+  in between don't come back.
+- A later change on a block that is already changed never takes or empties the inventory: if it
+  replaces a block with an inventory (a rotated chest broken afterwards), Paper drops the items
+  as it would without the manager, and no undo or crash recovery writes them back.
+- Saved items never overwrite a live inventory that holds items (a chest placed again by a later
+  change and filled by players): the live items stay and the saved ones drop at the block.
+  If another plugin cancels the `ItemSpawnEvent` of such a drop, that item is gone, as it would
+  be for Paper's own drop of a broken container's items.
 - Timers are in-memory, not persisted countdowns. Persistent marker recovery remains
   unchanged: after a crash, orphan markers restore blocks when their entities load.
 - Several changes on one block are kept separately, oldest first, with one marker
@@ -112,6 +149,40 @@ add(Change, boolean applyPhysics, long durationTicks): void
   out: the change above it takes over its restore state. So an older deadline no longer
   overwrites a newer edit, and the last undo always lands on the original.
 - After a crash, the marker restores the original state; changes and causes are not persisted.
+  Markers carry an `altered_block_format` key; ones written by older builds (without it) are
+  recovered by the exact code those builds used (`applyLegacyTileData`: items written to the
+  state's live inventory, then the state updated), whatever its net effect, and nothing is
+  dropped, since their payload may be items that never left the block.
+- Undoing a block whose chunk unloaded and loaded again removes its marker by UUID. If the
+  marker's entities are not loaded at that moment, it is looked for every tick for 100 ticks and
+  removed once it loads, and if it loads later in this session it is removed without restoring.
+  When the retry gives up, the UUID is forgotten only if the marker's chunk has its entities
+  loaded without it (the marker was deleted, so it can never load); otherwise it is kept. At most
+  4096 are kept: past that the oldest is forgotten with a warning, and that marker restores its
+  block once more if it ever loads.
+- When an undo or crash recovery puts a marker's captured items back, the block entity gets the
+  marker's UUID in its PDC (`altered_block_restored`), written in the same update as the items.
+  A marker that then loads again (a restart after the undo, or a recovery run twice) is removed
+  without writing anything, and an undo whose restore threw stays registered and can be called
+  again without writing the items twice.
+- While `apply` changes a block (until the change is registered) or a block is being restored (an
+  undo, or recovery from its marker), code called back from inside (an `EntitySpawnEvent`,
+  `BlockPhysicsEvent` or displaced item's `ItemSpawnEvent` listener, for example) can't change
+  it: an undo of one of its changes is ignored with a warning, and `apply`, `register` or `add`
+  on it throws `IllegalStateException`. An apply or restore that threw leaves the block free again.
+- Remaining window: an undo finds its marker not loaded, and the server stops or crashes before
+  the marker's entities load and the 100-tick retry or a load event removes it. On Paper a
+  chunk's entities load with the chunk, which the undo's own block write loads, so this needs
+  the entities to stay unloaded that long (seen most plausibly in `restoreAll` on shutdown,
+  where no retry can run). The note that the marker was removed is only in memory, so after the
+  restart the marker restores once more when it loads:
+  - it writes the original BlockData and tile data again, which is what the undo wrote, so it
+    only overwrites an edit made to that block in between while its entities were not loaded
+    (WorldEdit, another plugin);
+  - for a block whose undo put captured items back, the `altered_block_restored` stamp makes it
+    remove itself without writing anything; but if such an edit replaced the restored
+    container in between, the stamp went with the old block entity and the marker puts the
+    captured items in once more.
 
 ### Causes
 

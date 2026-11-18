@@ -5,6 +5,7 @@ import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import com.google.gson.JsonSyntaxException
 import com.sneakyutils.SneakyUtils
+import io.papermc.paper.block.TileStateInventoryHolder
 import io.papermc.paper.registry.RegistryAccess
 import io.papermc.paper.registry.RegistryKey
 import net.kyori.adventure.text.serializer.gson.GsonComponentSerializer
@@ -15,12 +16,15 @@ import org.bukkit.Material
 import org.bukkit.NamespacedKey
 import org.bukkit.World
 import org.bukkit.block.Banner
+import org.bukkit.block.Chest
 import org.bukkit.block.Block
 import org.bukkit.block.BlockState
 import org.bukkit.block.Container
 import org.bukkit.block.CreatureSpawner
+import org.bukkit.block.Jukebox
 import org.bukkit.block.Lectern
 import org.bukkit.block.Sign
+import org.bukkit.block.TileState
 import org.bukkit.block.banner.Pattern
 import org.bukkit.block.banner.PatternType
 import org.bukkit.block.data.BlockData
@@ -56,6 +60,18 @@ import java.util.logging.Logger
 class AlteredBlockManager(private val plugin: JavaPlugin) {
 
     private val pendingUndos = IdentityHashMap<Change, BukkitTask>()
+
+    /** Markers removed while their entities were not loaded (see [removeMarker]); dropped as they load. */
+    private val removedMarkerIds: MutableSet<UUID> = LinkedHashSet()
+
+    /** Most UUIDs [removedMarkerIds] keeps; the oldest go first, with a warning. */
+    internal var removedMarkerCap = 4096
+
+    /** Size of [removedMarkerIds]; for tests. */
+    internal val removedMarkerCount: Int get() = removedMarkerIds.size
+
+    /** How long [removeMarker] keeps looking for a marker that was not loaded, in ticks. */
+    private val markerRetryTicks = 100L
     private val alteredBlocks: MutableMap<Block, AlteredBlock> = HashMap()
 
     /** Tracked blocks by world UID, then chunk key. Kept in step with [alteredBlocks] for [getBlocksInBox]. */
@@ -77,16 +93,65 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
     private val yKey = NamespacedKey(plugin, "altered_block_y")
     private val zKey = NamespacedKey(plugin, "altered_block_z")
 
-    /** Registers a supplied change on top of the block's existing changes. Does not write to the world. */
+    /**
+     * Set on markers that follow this build's inventory custody rules (only a block's first change
+     * holds items, and only items it took out of the world). Markers without it come from older
+     * builds and are recovered as those builds did.
+     */
+    private val formatKey = NamespacedKey(plugin, "altered_block_format")
+
+    /**
+     * Written into a block entity's own PDC, in the same state update that puts a marker's captured
+     * items back: the marker's UUID. A replay of that marker (a retry after an exception, or a marker
+     * that loads after a restart although its change was already undone) sees the items are back.
+     */
+    private val restoredKey = NamespacedKey(plugin, "altered_block_restored")
+
+    /**
+     * Blocks being changed by [apply] (until registered) or restored (an undo, or recovery from a
+     * marker). These call other code synchronously (EntitySpawnEvent, BlockPhysicsEvent, a displaced
+     * item's ItemSpawnEvent), which must not change the same block meanwhile: an undo there is
+     * ignored, a new change throws.
+     */
+    private val restoring: MutableSet<Block> = HashSet()
+
+    private inline fun <T> whileRestoring(block: Block, action: () -> T): T {
+        restoring.add(block)
+        try {
+            return action()
+        } finally {
+            restoring.remove(block)
+        }
+    }
+
+    private fun checkNotRestoring(block: Block) {
+        check(block !in restoring) { "Altered block at ${block.location} is being changed or restored; change it afterwards" }
+    }
+
+    /**
+     * Registers a supplied change on top of the block's existing changes. Does not write to the world.
+     * The change never holds inventory items: the external edit decided what became of them.
+     */
     fun add(change: Change) {
+        checkNotRestoring(change.block)
+        addChange(change, takesInventory = false, applied = false, appliedMarker = null)
+    }
+
+    /**
+     * [add]. From [apply] ([applied]), the block's marker (if it is the block's first change) was
+     * already spawned as [appliedMarker], null when Paper refused it, and [takesInventory] says whether
+     * apply took the live items (see [AlteredBlock.push]).
+     */
+    private fun addChange(change: Change, takesInventory: Boolean, applied: Boolean, appliedMarker: Entity?) {
         val isNew = !alteredBlocks.containsKey(change.block)
         val alteredBlock = alteredBlocks.computeIfAbsent(change.block) { AlteredBlock(change) }
-        alteredBlock.push(change)
+        alteredBlock.push(change, takesInventory)
         blocksByName.getOrPut(change.internalName) { HashSet() }.add(change.block)
         for (cause in change.causes) blocksByCause.getOrPut(cause) { HashSet() }.add(change.block)
         if (isNew) {
             indexBlock(change.block)
-            alteredBlock.marker = spawnMarker(change.block, change.fromData, change.fromState)
+            alteredBlock.marker = if (applied) appliedMarker
+            else spawnMarker(change.block, change.fromData, alteredBlock.restoreAt(0).tileData())
         }
     }
 
@@ -154,12 +219,56 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
         causes: Set<String> = emptySet(),
     ): Change {
         AlteredBlockCauses.requireValid(causes)
+        checkNotRestoring(block)
         val fromData = block.blockData
         val fromState = block.state
-        block.setBlockData(newData, applyPhysics)
-        val change = Change(internalName, block, fromData, fromState, causes.toSet())
-        add(change)
-        return change
+        val first = !isTracked(block)
+        // Guarded until registered: the marker spawn and the block write call other plugins
+        // synchronously (EntitySpawnEvent, BlockPhysicsEvent), which must not edit this block meanwhile.
+        return whileRestoring(block) {
+            var marker: Entity? = null
+            var tookItems = false
+            if (first) {
+                // The recovery marker comes first: only once Paper has accepted it may the live items
+                // move into the change's custody. If it was refused, Paper handles them as without the
+                // manager (they drop when the block entity goes).
+                marker = spawnMarker(block, fromData, null).takeIf { it.isValid }
+                if (marker == null) {
+                    logger.warning("Recovery marker for altered block at ${block.location} was refused; " +
+                        "leaving its items to Paper")
+                } else {
+                    // After the capture: the snapshot keeps the items.
+                    tookItems = emptyLiveInventory(block, newData)
+                    val tileData = if (tookItems) serializeTileData(fromState) else serializeTileDataWithoutItems(fromState)
+                    if (tileData != null) marker.persistentDataContainer.set(blockStateKey, PersistentDataType.STRING, tileData)
+                }
+            }
+            block.setBlockData(newData, applyPhysics)
+            val change = Change(internalName, block, fromData, fromState, causes.toSet())
+            addChange(change, takesInventory = tookItems, applied = true, appliedMarker = marker)
+            change
+        }
+    }
+
+    /**
+     * Empties the live inventory of a block with an inventory that is about to become another block
+     * type, so Paper does not drop its items on the ground when the block entity goes; the change's
+     * captured snapshot holds them and undo writes them back. Call after capturing [Block.getState].
+     * A change to the same block type keeps the block entity and its items, so nothing is emptied.
+     * A chest's live inventory spans both halves of a double chest while its snapshot covers only its
+     * own block, so only that block's inventory is emptied. A jukebox keeps its record (see
+     * [serializeTileData]), which Paper drops as it would without the manager. Returns whether it
+     * took the items, which decides whether the change holds them.
+     */
+    private fun emptyLiveInventory(block: Block, newData: BlockData): Boolean {
+        if (newData.material == block.type) return false
+        when (val live = block.getState(false)) {
+            is Jukebox -> return false
+            is Chest -> live.blockInventory.clear()
+            is TileStateInventoryHolder -> live.inventory.clear()
+            else -> return false
+        }
+        return true
     }
 
     /** [apply] with a single [cause]. */
@@ -461,21 +570,29 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
     }
 
     private fun undo(change: Change, applyPhysics: Boolean) {
-        pendingUndos.remove(change)?.cancel()
         val block = change.block
+        if (block in restoring) {
+            // Called back from inside this block's own restore: the stack is mid-update.
+            logger.warning("Ignored an undo of altered block at ${block.location} while it is being changed or restored")
+            return
+        }
+        pendingUndos.remove(change)?.cancel()
         val alteredBlock = alteredBlocks[block] ?: return
         val index = alteredBlock.indexOf(change)
         if (index < 0) return
         val lastIndex = alteredBlock.changes.size - 1
-        if (lastIndex == 0) {
-            restoreBlockState(block, alteredBlock.originalBlockData, alteredBlock.originalBlockState, applyPhysics)
-            removeMarker(alteredBlock)
-            alteredBlocks.remove(block)
-            unindexBlock(block)
-            alteredBlock.removeAt(index)
-        } else if (index == lastIndex) {
-            val (data, state) = alteredBlock.removeAt(index)
-            restoreBlockState(block, data, state, applyPhysics)
+        if (index == lastIndex) {
+            // The entry stays until the restore succeeds, so a failed undo can be retried; a retry
+            // does not put the items back twice (see restoredKey).
+            whileRestoring(block) {
+                restoreBlockState(block, alteredBlock.restoreAt(index), applyPhysics, alteredBlock.marker?.uniqueId)
+                alteredBlock.removeAt(index)
+                if (lastIndex == 0) {
+                    removeMarker(alteredBlock)
+                    alteredBlocks.remove(block)
+                    unindexBlock(block)
+                }
+            }
         } else {
             // An older change: the block keeps showing the newer ones; the change above it now
             // restores to what this one would have.
@@ -484,12 +601,57 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
         unindexChange(change, alteredBlock.changes)
     }
 
-    private fun restoreBlockState(block: Block, blockData: BlockData, blockState: BlockState, applyPhysics: Boolean) {
-        block.setBlockData(blockData, applyPhysics)
-        val tileData = serializeTileData(blockState)
+    private fun restoreBlockState(block: Block, restore: Restore, applyPhysics: Boolean, markerId: UUID?) {
+        block.setBlockData(restore.data, applyPhysics)
+        val tileData = restore.tileData()
         if (tileData != null) {
-            applySerializedTileData(block, tileData, applyPhysics)
+            if (markerId != null) writeTileData(block, tileData, applyPhysics, markerId)
+            else applySerializedTileData(block, tileData, applyPhysics)
         }
+    }
+
+    /**
+     * [applySerializedTileData] for tile data held by [markerId]'s change, whose items it took out of
+     * the world. The items go back at most once: with them the block entity gets [restoredKey] set
+     * to [markerId], and if it already has that, they are back and are left out. They never
+     * overwrite a live inventory that still holds items (a block entity that survived because a
+     * later change placed the same block type again and players filled it): those stay, and the
+     * saved items drop at the block instead.
+     */
+    private fun writeTileData(block: Block, json: String, applyPhysics: Boolean, markerId: UUID) {
+        val root = JsonParser.parseString(json).asJsonObject
+        if (!root.has("items")) {
+            applySerializedTileData(block, json, applyPhysics)
+            return
+        }
+        if (itemsRestored(block, markerId)) {
+            root.remove("items")
+            applyTileData(block, root, applyPhysics, null)
+            return
+        }
+        val live = when (val state = block.getState(false)) {
+            is Chest -> state.blockInventory
+            is TileStateInventoryHolder -> state.inventory
+            else -> null
+        }
+        var displaced: Array<ItemStack?>? = null
+        if (live != null && !live.isEmpty) {
+            displaced = decodeItems(root.get("items").asString)
+            root.remove("items")
+        }
+        applyTileData(block, root, applyPhysics, restoredKey to markerId.toString())
+        if (displaced != null) {
+            val at = block.location.add(0.5, 0.5, 0.5)
+            for (item in displaced) {
+                if (item != null && !item.type.isAir) block.world.dropItemNaturally(at, item)
+            }
+        }
+    }
+
+    /** Whether [block]'s block entity already got the items of [markerId]'s change back (see [restoredKey]). */
+    private fun itemsRestored(block: Block, markerId: UUID): Boolean {
+        val state = block.getState(false) as? TileState ?: return false
+        return state.persistentDataContainer.get(restoredKey, PersistentDataType.STRING) == markerId.toString()
     }
 
     /**
@@ -524,7 +686,19 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
         if (!entity.scoreboardTags.contains(SneakyUtils.ALTERED_BLOCK_TAG)) return
 
         val block = getMarkedBlock(entity)
+        if (block != null && block in restoring) return
+        if (block != null) whileRestoring(block) { restoreFromMarker(entity, block) } else restoreFromMarker(entity, null)
+    }
+
+    private fun restoreFromMarker(entity: Entity, block: Block?) {
         val pdc = entity.persistentDataContainer
+        val current = pdc.has(formatKey, PersistentDataType.INTEGER)
+        if (current && block != null && itemsRestored(block, entity.uniqueId)) {
+            // Its change was undone (or this restore already ran) but the marker was not loaded to
+            // be removed: the block already holds what it would write.
+            entity.remove()
+            return
+        }
         val dataString = pdc.get(blockDataKey, PersistentDataType.STRING)
         if (block != null && dataString != null) {
             try {
@@ -536,7 +710,13 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
             val stateString = pdc.get(blockStateKey, PersistentDataType.STRING)
             if (stateString != null) {
                 try {
-                    applySerializedTileData(block, stateString, false)
+                    if (current) {
+                        writeTileData(block, stateString, false, entity.uniqueId)
+                    } else {
+                        // An older build's marker: its items may still be in the block, so write the
+                        // payload exactly as that build did (see applyLegacyTileData), dropping nothing.
+                        applyLegacyTileData(block, stateString, false)
+                    }
                 } catch (e: RuntimeException) {
                     logger.severe("Invalid altered-block marker tile data at ${block.location}: ${e.message}")
                 }
@@ -545,7 +725,7 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
         entity.remove()
     }
 
-    private fun spawnMarker(block: Block, originalData: BlockData, originalState: BlockState): Marker {
+    private fun spawnMarker(block: Block, originalData: BlockData, tileData: String?): Marker {
         val loc: Location = block.location.add(0.5, 0.5, 0.5)
         val marker = block.world.spawnEntity(loc, EntityType.MARKER) as Marker
         marker.isPersistent = true
@@ -554,8 +734,8 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
         marker.isInvulnerable = true
         marker.addScoreboardTag(SneakyUtils.ALTERED_BLOCK_TAG)
         val pdc = marker.persistentDataContainer
+        pdc.set(formatKey, PersistentDataType.INTEGER, MARKER_FORMAT)
         pdc.set(blockDataKey, PersistentDataType.STRING, originalData.asString)
-        val tileData = serializeTileData(originalState)
         if (tileData != null) {
             pdc.set(blockStateKey, PersistentDataType.STRING, tileData)
         }
@@ -566,12 +746,75 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
         return marker
     }
 
+    /**
+     * Removes [alteredBlock]'s marker. After its chunk unloaded and loaded again, the held entity is a
+     * stale object, so the live one is looked up by UUID. If it is not loaded right now, its UUID is
+     * remembered and the marker is discarded, without restoring, when it next loads in this session.
+     */
     private fun removeMarker(alteredBlock: AlteredBlock) {
         val marker = alteredBlock.marker
-        if (marker != null && marker.isValid) {
-            marker.remove()
+        if (marker != null) {
+            val live = if (marker.isValid) marker else Bukkit.getEntity(marker.uniqueId)?.takeIf { it.isValid }
+            if (live != null) {
+                live.remove()
+            } else {
+                rememberRemovedMarker(marker.uniqueId)
+                retryMarkerRemoval(marker.uniqueId, marker.location)
+            }
         }
         alteredBlock.marker = null
+    }
+
+    /**
+     * Looks for the unloaded marker [id] every tick for [markerRetryTicks] and removes it once it is
+     * loaded (a chunk's entities load just after the chunk), so a restart has as small a window as
+     * possible to find it still there. Not while the plugin is disabling (restoreAll on shutdown).
+     */
+    private fun retryMarkerRemoval(id: UUID, location: Location) {
+        if (!plugin.isEnabled) return
+        var ticks = 0L
+        lateinit var task: BukkitTask
+        task = Bukkit.getScheduler().runTaskTimer(plugin, Runnable {
+            val entity = Bukkit.getEntity(id)
+            if (entity != null && entity.isValid) {
+                entity.remove()
+                removedMarkerIds.remove(id)
+                task.cancel()
+            } else if (id !in removedMarkerIds) {
+                task.cancel()
+            } else if (++ticks >= markerRetryTicks) {
+                // Its chunk's entities are loaded and it is not among them: it was deleted (an admin,
+                // a cleanup plugin) and can never load, so stop waiting for it. Otherwise keep it.
+                if (entitiesLoaded(location)) removedMarkerIds.remove(id)
+                task.cancel()
+            }
+        }, 1L, 1L)
+    }
+
+    private fun entitiesLoaded(location: Location): Boolean {
+        val world = location.world ?: return false
+        val cx = location.blockX shr 4
+        val cz = location.blockZ shr 4
+        return world.isChunkLoaded(cx, cz) && world.getChunkAt(cx, cz).isEntitiesLoaded
+    }
+
+    private fun rememberRemovedMarker(id: UUID) {
+        removedMarkerIds.add(id)
+        if (removedMarkerIds.size <= removedMarkerCap) return
+        val oldest = removedMarkerIds.iterator().next()
+        removedMarkerIds.remove(oldest)
+        logger.warning("Forgot removed altered-block marker $oldest (over $removedMarkerCap pending); " +
+            "if it loads it restores its block once more")
+    }
+
+    /**
+     * When [entity] is a marker this session already removed while it was unloaded, removes it and
+     * returns true; the listener then skips restoring from it. Called as marker entities load.
+     */
+    internal fun discardRemovedMarker(entity: Entity): Boolean {
+        if (!removedMarkerIds.remove(entity.uniqueId)) return false
+        if (entity.isValid) entity.remove()
+        return true
     }
 
     /**
@@ -582,32 +825,55 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
         val originalBlockData: BlockData = change.fromData
         val originalBlockState: BlockState = change.fromState
         private val entries: MutableList<Change> = ArrayList()
-        private val restoreTo: MutableList<Pair<BlockData, BlockState>> = ArrayList()
+        private val restoreTo: MutableList<Restore> = ArrayList()
 
         /** Active changes, oldest first (read-only view). */
         val changes: List<Change> get() = entries
         var marker: Entity? = null
 
-        internal fun push(change: Change) {
+        /**
+         * Adds [change], whose new block is already in the world (after apply's write, or after the
+         * external edit a register/add records). Only a change whose apply actually took the live items
+         * ([takesInventory]: the block's first change, its marker accepted, the material changing)
+         * holds them: see [Restore]. A register/add change never does; the external edit
+         * already decided what became of the items (dropped, kept, moved).
+         */
+        internal fun push(change: Change, takesInventory: Boolean) {
+            val first = entries.isEmpty()
             entries.add(change)
-            restoreTo.add(change.fromData to change.fromState)
+            restoreTo.add(Restore(change.fromData, change.fromState, takesInventory && first))
         }
 
         internal fun indexOf(change: Change): Int = entries.indexOfFirst { it === change }
 
+        internal fun restoreAt(index: Int): Restore = restoreTo[index]
+
         /** The BlockData undoing the change at [index] writes back if it is the newest change. */
-        internal fun restoreDataAt(index: Int): BlockData = restoreTo[index].first
+        internal fun restoreDataAt(index: Int): BlockData = restoreTo[index].data
 
         /**
-         * Removes the change at [index] and returns the state it would restore. A change above it
-         * inherits that state, so the stack still unwinds to the original.
+         * Removes the change at [index] and returns what it would restore. A change above it
+         * inherits that (including the first change's captured items), so the stack still unwinds
+         * to the original and the items are written back at most once.
          */
-        internal fun removeAt(index: Int): Pair<BlockData, BlockState> {
+        internal fun removeAt(index: Int): Restore {
             entries.removeAt(index)
             val target = restoreTo.removeAt(index)
             if (index < restoreTo.size) restoreTo[index] = target
             return target
         }
+    }
+
+    /**
+     * What undoing a change writes back: [data], the tile data of [state], and, when [takeItems],
+     * the inventory items captured in [state]. Without [takeItems] the live inventory is left as it
+     * is: the captured block had no inventory; or the change kept the block's material (a chest
+     * turned to face east), so the block entity and its items stayed in place and writing the
+     * captured items back would return what was taken out since; or the block was already changed,
+     * so the change left the inventory to Paper, which drops it when the block entity goes.
+     */
+    internal class Restore(val data: BlockData, val state: BlockState, val takeItems: Boolean) {
+        fun tileData(): String? = if (takeItems) serializeTileData(state) else serializeTileDataWithoutItems(state)
     }
 
     /**
@@ -653,11 +919,34 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
     companion object {
         private val COMPONENT_JSON = GsonComponentSerializer.gson()
 
+        /** Marker format written by this build; see [formatKey]. */
+        private const val MARKER_FORMAT = 2
+
         private fun chunkKey(cx: Int, cz: Int): Long = (cx.toLong() shl 32) or (cz.toLong() and 0xffffffffL)
+
+        /**
+         * [serializeTileData] of [state] without its items, for a restore that leaves the live
+         * inventory alone: a lectern keeps only its page, other inventory holders have nothing to
+         * write. The inventory is never encoded.
+         */
+        internal fun serializeTileDataWithoutItems(state: BlockState): String? = when (state) {
+            is Lectern -> JsonObject().apply {
+                addProperty("v", 1)
+                addProperty("kind", "lectern")
+                addProperty("page", state.page)
+            }.toString()
+            is TileStateInventoryHolder -> null
+            else -> serializeTileData(state)
+        }
 
         /**
          * Serializes tile-entity state for cross-session marker restore (signs, containers, etc.).
          * Returns null when there is nothing beyond BlockData to store.
+         *
+         * Items of every block with an inventory (any [TileStateInventoryHolder]: containers, chiseled
+         * bookshelves, decorated pots, shelves; the lectern also keeps its page; not a jukebox) are read
+         * from the state's snapshot inventory. On a placed state, getInventory() reads the live block,
+         * which no longer holds them once the block has been changed.
          */
         @JvmStatic
         fun serializeTileData(state: BlockState?): String? {
@@ -673,14 +962,19 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
                     root.add("back", serializeSignSide(state.getSide(Side.BACK)))
                     root.addProperty("waxed", state.isWaxed)
                 }
-                is Container -> {
-                    root.addProperty("kind", "container")
-                    root.addProperty("items", encodeItems(state.inventory.contents))
-                }
                 is Lectern -> {
                     root.addProperty("kind", "lectern")
-                    root.addProperty("items", encodeItems(state.inventory.contents))
+                    root.addProperty("items", encodeItems(state.snapshotInventory.contents))
                     root.addProperty("page", state.page)
+                }
+                // Not saved, as before this build: on Paper every way of writing a record back
+                // (CraftJukebox.update's setBlockAndUpdate, setRecord's updateNeighborsAt) updates
+                // neighbours whatever the physics flag.
+                is Jukebox -> return null
+                is TileStateInventoryHolder -> {
+                    // "container": the kind every inventory holder uses (older records: Container only).
+                    root.addProperty("kind", "container")
+                    root.addProperty("items", encodeItems(state.snapshotInventory.contents))
                 }
                 is CreatureSpawner -> {
                     root.addProperty("kind", "spawner")
@@ -737,6 +1031,11 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
         private fun decodeItems(encoded: String): Array<ItemStack?> =
             ItemStack.deserializeItemsFromBytes(Base64.getDecoder().decode(encoded)) as Array<ItemStack?>
 
+        /**
+         * Writes tile data from [serializeTileData] onto [block], which must already have the matching
+         * BlockData. Items go into a fresh state's snapshot inventory, which update(true) then applies
+         * (writing the live inventory would be overwritten by that update).
+         */
         @JvmStatic
         fun applySerializedTileData(block: Block, json: String, applyPhysics: Boolean) {
             val root: JsonObject
@@ -747,7 +1046,53 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
             } catch (e: IllegalStateException) {
                 throw IllegalArgumentException("malformed tile JSON", e)
             }
+            applyTileData(block, root, applyPhysics, null)
+        }
 
+        /**
+         * origin/main's applySerializedTileData, kept for markers written by older builds (no format
+         * key), so they recover exactly as they did: container and lectern items are written to the
+         * state's live inventory and the state, whose snapshot was taken before that write, is then
+         * updated, whatever the net effect on Paper. Every other kind takes the unchanged path.
+         */
+        internal fun applyLegacyTileData(block: Block, json: String, applyPhysics: Boolean) {
+            val root: JsonObject
+            try {
+                root = JsonParser.parseString(json).asJsonObject
+            } catch (e: JsonSyntaxException) {
+                throw IllegalArgumentException("malformed tile JSON", e)
+            } catch (e: IllegalStateException) {
+                throw IllegalArgumentException("malformed tile JSON", e)
+            }
+
+            val kind = if (root.has("kind")) root.get("kind").asString else ""
+            when (kind) {
+                "container" -> {
+                    val state = block.state
+                    if (state !is Container) return
+                    state.inventory.contents = decodeItems(root.get("items").asString)
+                    state.update(true, applyPhysics)
+                }
+                "lectern" -> {
+                    val state = block.state
+                    if (state !is Lectern) return
+                    state.inventory.contents = decodeItems(root.get("items").asString)
+                    if (root.has("page")) {
+                        state.page = root.get("page").asInt
+                    }
+                    state.update(true, applyPhysics)
+                }
+                else -> applyTileData(block, root, applyPhysics, null)
+            }
+        }
+
+        /**
+         * [applySerializedTileData] on a parsed record. For an inventory record, [stamp] (a PDC key
+         * and value) is written into the block entity in the same update as the items.
+         */
+        private fun applyTileData(
+            block: Block, root: JsonObject, applyPhysics: Boolean, stamp: Pair<NamespacedKey, String>?,
+        ) {
             val kind = if (root.has("kind")) root.get("kind").asString else ""
             val state = block.state
 
@@ -762,13 +1107,17 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
                     state.update(true, applyPhysics)
                 }
                 "container" -> {
-                    if (state !is Container) return
-                    state.inventory.contents = decodeItems(root.get("items").asString)
+                    if (state !is TileStateInventoryHolder) return
+                    if (!root.has("items") && stamp == null) return
+                    if (root.has("items")) setSnapshotItems(state, decodeItems(root.get("items").asString))
+                    if (stamp != null) state.persistentDataContainer.set(stamp.first, PersistentDataType.STRING, stamp.second)
                     state.update(true, applyPhysics)
                 }
                 "lectern" -> {
                     if (state !is Lectern) return
-                    state.inventory.contents = decodeItems(root.get("items").asString)
+                    // No items: a same-type change, which leaves the book where it is.
+                    if (root.has("items")) setSnapshotItems(state, decodeItems(root.get("items").asString))
+                    if (stamp != null) state.persistentDataContainer.set(stamp.first, PersistentDataType.STRING, stamp.second)
                     if (root.has("page")) {
                         state.page = root.get("page").asInt
                     }
@@ -810,6 +1159,12 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
                     state.update(true, applyPhysics)
                 }
             }
+        }
+
+        /** Fills [state]'s snapshot inventory slot by slot (extra saved slots are ignored, missing ones emptied). */
+        private fun setSnapshotItems(state: TileStateInventoryHolder, items: Array<ItemStack?>) {
+            val inventory = state.snapshotInventory
+            inventory.contents = Array(inventory.size) { items.getOrNull(it) }
         }
 
         private fun applySignSide(side: org.bukkit.block.sign.SignSide, obj: JsonObject?) {

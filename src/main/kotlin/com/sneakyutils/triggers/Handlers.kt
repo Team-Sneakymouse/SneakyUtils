@@ -3,6 +3,7 @@ package com.sneakyutils.triggers
 import org.bukkit.block.Block
 import org.bukkit.entity.Entity
 import org.bukkit.entity.Player
+import org.bukkit.event.Event
 import org.bukkit.event.block.BlockBreakEvent
 import org.bukkit.event.player.PlayerEvent
 import org.bukkit.event.player.PlayerInteractEvent
@@ -182,6 +183,140 @@ fun interface BlockClickHandler {
 /** A block break callback. Cancel through [event] if needed. */
 fun interface BlockBreakHandler {
     fun onBreak(player: Player, block: Block, event: BlockBreakEvent)
+}
+
+/**
+ * Why a watched block is being removed ([Triggers.onBlockRemoved]), and which event reports it. Every event is
+ * observed at `MONITOR` and only when nobody cancelled it.
+ */
+enum class BlockRemoveCause {
+    /**
+     * A player breaks it ([org.bukkit.event.block.BlockBreakEvent]). Not for breaks Paper refuses after that event: a
+     * spectator's, or a game-master block (command, structure, jigsaw, test blocks) the player may not break.
+     */
+    BREAK,
+
+    /**
+     * An explosion destroys it: a block in [org.bukkit.event.block.BlockExplodeEvent.blockList] or
+     * [org.bukkit.event.entity.EntityExplodeEvent.blockList] of an explosion that destroys blocks (not a wind charge's
+     * [org.bukkit.ExplosionResult.TRIGGER_BLOCK]), and only blocks an explosion can destroy (not bedrock, barriers, end
+     * portal frames and the other blocks Paper protects). Also the bed half that was used, or the respawn anchor, that exploded
+     * itself, which Paper has already removed when the [org.bukkit.event.block.BlockExplodeEvent] fires (delivered even
+     * when that event is cancelled, since the source is gone either way; a bed's other half is not reported). TNT comes
+     * from the [org.bukkit.event.block.TNTPrimeEvent] that primes it (cause `EXPLOSION`), so TNT whose priming is
+     * cancelled and stays is never reported. An ender dragon's breaks come from its
+     * [org.bukkit.event.entity.EntityExplodeEvent] at yield 0 (its default), or from Paper's old TNT prime event per block
+     * when a plugin changed the yield.
+     */
+    EXPLODE,
+
+    /**
+     * Fire burns it away ([org.bukkit.event.block.BlockBurnEvent]). TNT comes from Paper's old
+     * `com.destroystokyo.paper.event.block.TNTPrimeEvent` with reason `FIRE` instead, the last event that can keep it
+     * (the block may already hold fire by then).
+     */
+    BURN,
+
+    /**
+     * It fades, melts or turns into another block by world conditions ([org.bukkit.event.block.BlockFadeEvent]): snow
+     * and ice melting, fire burning out, coral dying, grass or farmland turning to dirt.
+     */
+    FADE,
+
+    /** Leaves decay ([org.bukkit.event.block.LeavesDecayEvent]). */
+    DECAY,
+
+    /**
+     * A piston moves it away from this position or breaks it (a block in
+     * [org.bukkit.event.block.BlockPistonExtendEvent.getBlocks] or
+     * [org.bukkit.event.block.BlockPistonRetractEvent.getBlocks]; Paper lists the blocks a piston breaks there too),
+     * at the block's original position; or it is the head of a retracting piston (found from the base's facing; a sticky
+     * pull's head is reported even when that pull is cancelled, since Paper clears it before the event).
+     */
+    PISTON,
+
+    /**
+     * The server destroys it ([com.destroystokyo.paper.event.block.BlockDestroyEvent]): a block losing its support (a
+     * torch, a sign, a carpet), `/setblock ... destroy`, and the breaks of entities that go through the server's
+     * destroy (a wither, a ravager, a villager harvesting, a sheep eating short grass, a boat breaking a lily pad, a
+     * projectile breaking a chorus flower or pot, trampled turtle eggs or crops). Also, on the next tick, a rail (or a
+     * redstone wire, repeater or comparator) whose support another reported event took away: rails always, and the
+     * others when their support is broken or blown up, remove themselves with no event, so they are checked after the
+     * fact; the block is already gone then, and the event is the support's.
+     */
+    DESTROY,
+
+    /**
+     * An entity changes it directly ([org.bukkit.event.entity.EntityChangeBlockEvent] where the block isn't air and the
+     * new type differs): an enderman picking it up, sand or gravel starting to fall, a falling block landing on a
+     * replaceable block, a player eating the last slice of cake, a sheep turning grass to dirt, farmland trampled,
+     * silverfish infesting stone. Entity breaks that go on to the server's destroy come as [DESTROY], from the event
+     * that decides them. A burning projectile priming TNT comes from the [org.bukkit.event.block.TNTPrimeEvent] (cause
+     * `PROJECTILE`).
+     */
+    ENTITY,
+
+    /**
+     * Flowing water or lava washes it away ([org.bukkit.event.block.BlockFromToEvent] into a block that isn't air, a
+     * fluid or waterloggable); or it is a fluid that recedes or turns into another block
+     * ([org.bukkit.event.block.FluidLevelChangeEvent] to a different material, such as flowing water drying up).
+     */
+    FLUID,
+
+    /**
+     * TNT is lit and turns into primed TNT by redstone, a player's flint and steel or a dispenser
+     * ([org.bukkit.event.block.TNTPrimeEvent] with cause `REDSTONE`, `PLAYER` or `DISPENSER`).
+     */
+    PRIME,
+
+    /** A dragon egg teleports away from it ([org.bukkit.event.block.BlockFromToEvent] with face `SELF`). */
+    TELEPORT,
+
+    /**
+     * Something spreads onto it and turns it into another block ([org.bukkit.event.block.BlockSpreadEvent]): sculk over
+     * stone, grass or mycelium over dirt.
+     */
+    SPREAD,
+
+    /**
+     * A player places another block in its position ([org.bukkit.event.block.BlockPlaceEvent] or
+     * [org.bukkit.event.block.BlockMultiPlaceEvent], accepted and with `canBuild()`), such as a block placed into short
+     * grass. Unlike the other causes, the world already holds the new block when the handler runs; the old one is the
+     * event's replaced state.
+     */
+    REPLACE,
+
+    /**
+     * A block forms in its place ([org.bukkit.event.block.BlockFormEvent], including
+     * [org.bukkit.event.block.EntityBlockFormEvent]): concrete powder hardening, lava turning to obsidian or
+     * cobblestone, water turning to stone or freezing (also frost walker ice). Not copper weathering, and not concrete
+     * powder placed straight into water (that is [REPLACE]).
+     */
+    FORM,
+
+    /**
+     * A sponge soaks it up ([org.bukkit.event.block.SpongeAbsorbEvent]): water and water plants. A block that only loses
+     * its water (waterlogged) stays and isn't reported.
+     */
+    ABSORB,
+
+    /**
+     * A player scoops it up with a bucket ([org.bukkit.event.player.PlayerBucketFillEvent]): a water or lava source,
+     * powder snow or a bubble column. A waterlogged block only loses its water and isn't reported.
+     */
+    BUCKET,
+}
+
+/**
+ * A block removal callback ([Triggers.onBlockRemoved]). [block] is the watched position and still holds the old
+ * block: the event hasn't been applied yet (except an exploding bed or respawn anchor, already gone, and
+ * [BlockRemoveCause.REPLACE], where the world already holds the placed block, and a rail or wire reported as
+ * [BlockRemoveCause.DESTROY] on the tick after its support went). [event] is the
+ * Bukkit event that reports it (see [BlockRemoveCause]); it is observed at `MONITOR`, so read it but don't cancel or
+ * change it.
+ */
+fun interface BlockRemovedHandler {
+    fun onRemoved(block: Block, cause: BlockRemoveCause, event: Event)
 }
 
 /**

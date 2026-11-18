@@ -10,6 +10,8 @@ import com.sneakyutils.triggers.BlockClickHandler
 import com.sneakyutils.triggers.BlockKey
 import com.sneakyutils.triggers.BlockMatch
 import com.sneakyutils.triggers.BlockOffset
+import com.sneakyutils.triggers.BlockRemovedHandler
+import com.sneakyutils.triggers.BlockRemovedOptions
 import com.sneakyutils.triggers.BlockWatchHandler
 import com.sneakyutils.triggers.BreakOptions
 import com.sneakyutils.triggers.ClickSide
@@ -42,6 +44,7 @@ import com.sneakyutils.triggers.engine.BlockWatch
 import com.sneakyutils.triggers.engine.Watch
 import com.sneakyutils.integration.Probe
 import org.bukkit.GameMode
+import org.bukkit.event.Listener
 import org.bukkit.Location
 import org.bukkit.Material
 import org.bukkit.entity.Player
@@ -66,6 +69,7 @@ internal class TriggerService(
     @JvmField val index = AreaIndex()
     @JvmField val core = MovementCore(index, this, maxSegmentBlocks)
     @JvmField val clicks = ClickIndex(this)
+    @JvmField val removals = RemovalIndex(this)
     private val tables = TableLoader(this)
 
     /** Active subscriptions by owner. Identity keys: plugins don't override equals. */
@@ -73,6 +77,10 @@ internal class TriggerService(
     private var sequence = 0L
     private var ticker: BukkitTask? = null
     private var listener: TriggerListener? = null
+
+    /** Registered on the first removal subscription and kept until shutdown ([ensureRemovalListener]). */
+    private var removalListener: BlockRemovedListener? = null
+    private var oldPrimeListener: Listener? = null
     private val pollLocation = Location(null, 0.0, 0.0, 0.0)
 
     @JvmField var running = false
@@ -274,6 +282,11 @@ internal class TriggerService(
         sampler = null
         listener?.let { org.bukkit.event.HandlerList.unregisterAll(it) }
         listener = null
+        removalListener?.let { org.bukkit.event.HandlerList.unregisterAll(it) }
+        removalListener = null
+        removals.shutdown()
+        oldPrimeListener?.let { org.bukkit.event.HandlerList.unregisterAll(it) }
+        oldPrimeListener = null
         pendingResync.clear()
         pendingRiding.clear()
         tables.clear()
@@ -610,6 +623,7 @@ internal class TriggerService(
     fun worldUnloaded(worldId: UUID) {
         for (reg in index.regsInWorld(worldId)) (reg.link as? SubBase)?.close()
         for (sub in clicks.blockSubsInWorld(worldId)) sub.close()
+        for (sub in removals.subsInWorld(worldId)) sub.close()
     }
 
     // ---------------------------------------------------------------- handler calls
@@ -959,6 +973,42 @@ internal class TriggerService(
         return sub
     }
 
+    override fun onBlockRemoved(owner: Plugin, block: BlockKey, handler: BlockRemovedHandler, options: BlockRemovedOptions): Subscription {
+        checkCall(owner)
+        requirePackable(block)
+        val sub = register(RemovedSub(this, owner, block, handler, options.label))
+        removals.add(sub)
+        ensureRemovalListener()
+        return sub
+    }
+
+    /**
+     * Registers the removal listener once. Until a plugin watches a removal, SneakyUtils listens to none of those events,
+     * so Paper doesn't build them (it skips `BlockDestroyEvent` without listeners) and fluid flow costs nothing extra.
+     */
+    private fun ensureRemovalListener() {
+        if (removalListener != null || !running) return
+        val l = BlockRemovedListener(this)
+        removalListener = l
+        plugin.server.pluginManager.registerEvents(l, plugin)
+        // Paper's old TNTPrimeEvent is deprecated for removal. Bukkit logs and skips a listener whose event class is gone,
+        // so check that it really listens; without it, fire-primed TNT and dragon breaks come from the earlier events.
+        try {
+            val old = OldTntPrimeListener(this)
+            plugin.server.pluginManager.registerEvents(old, plugin)
+            @Suppress("DEPRECATION", "removal")
+            val listening = com.destroystokyo.paper.event.block.TNTPrimeEvent.getHandlerList().registeredListeners
+                .any { it.listener === old }
+            if (listening) {
+                oldPrimeListener = old
+                l.oldPrime = true
+            }
+        } catch (e: LinkageError) {
+            plugin.logger.info("Paper's old TNTPrimeEvent is gone; block removal watches report fire-primed TNT and " +
+                "dragon breaks from the events before it")
+        }
+    }
+
     override fun onEntityClick(owner: Plugin, match: EntityMatch, handler: EntityClickHandler, options: ClickOptions): Subscription {
         checkCall(owner)
         require(options.sides != ClickSide.PHYSICAL) { "entity clicks have no PHYSICAL side" }
@@ -1002,6 +1052,10 @@ internal class TriggerService(
         m["events.interact"] = clicks.interactEvents
         m["events.break"] = clicks.breakEvents
         m["events.entity-click"] = clicks.entityEvents
+        m["events.block-removed"] = removals.events
+        m["block-removed.lookups"] = removals.lookups
+        m["block-removed.neighbour-checks"] = removals.neighbourChecks
+        m["block-removed.neighbour-removals"] = removals.neighbourRemovals
         return m
     }
 
@@ -1045,6 +1099,9 @@ internal class TriggerService(
         clicks.densest()?.let { (what, n) ->
             if (n > MANY_PER_KEY) out += "$what has $n subscriptions: every click there runs through all of them"
         }
+        removals.densest()?.let { (what, n) ->
+            if (n > MANY_PER_KEY) out += "$what has $n subscriptions: every removal there runs through all of them"
+        }
         if (core.queue.dropped > 0) out += "${core.queue.dropped} events were dropped by handler loops (see the log)"
         if (core.queue.selfTriggerDrops > 0) {
             out += "${core.queue.selfTriggerDrops} step calls were skipped because the handler itself caused them (a " +
@@ -1071,11 +1128,13 @@ internal class TriggerService(
         const val STAGE_RIDING = 8
         const val STAGE_CLICK = 16
         const val STAGE_INDEX = 32
+        const val STAGE_REMOVED = 64
 
         /** Every subscription kind, for the `subscriptions.by-kind.<kind>` levels (reported as 0 when none). */
         val KINDS = listOf(
             AreaSub.KIND, WatchSub.STEP, WatchSub.UNDER, WatchSub.BLOCK, TimerSub.KIND, PlayerTimerSub.KIND,
             PlayerTimerSub.KIND_ALL, BlockSub.CLICK, BlockSub.CLICK_TYPE, BlockSub.BREAK, BlockSub.BREAK_TYPE, EntitySub.KIND,
+            RemovedSub.KIND,
         )
 
         /** Warning thresholds (see [warnings]). 256 areas in one chunk cost about 1 us a block step on a desktop. */

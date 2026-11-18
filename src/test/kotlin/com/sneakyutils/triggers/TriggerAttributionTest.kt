@@ -160,6 +160,20 @@ class TriggerAttributionTest {
     }
 
     @Test
+    fun blockRemovalHandlersAreNamedInsideTheirStage() {
+        val a: org.bukkit.block.Block = world.getBlockAt(1, 64, 1).also { it.type = Material.STONE }
+        val b: org.bukkit.block.Block = world.getBlockAt(2, 64, 1).also { it.type = Material.STONE }
+        service.labelled("owner:anchor").onBlockRemoved(owner, BlockKey.of(a), { _, _, _ -> })
+        service.onBlockRemoved(owner, BlockKey.of(b), { _, _, _ -> })
+        capture()
+        server.pluginManager.callEvent(
+            org.bukkit.event.block.BlockExplodeEvent(a, a.state, mutableListOf(a, b), 1f, org.bukkit.ExplosionResult.DESTROY),
+        )
+        assertEquals(listOf("handler.owner.block-removed.owner:anchor", "handler.owner.block-removed", "block.removed"), probe.sections)
+        assertEquals(0, probe.nestingErrors)
+    }
+
+    @Test
     fun aSlowOrThrowingHandlerIsNamedInTheCounts() {
         val p = server.addPlayer()
         p.teleport(Location(world, 20.5, 64.0, 2.5))

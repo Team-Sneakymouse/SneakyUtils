@@ -88,6 +88,25 @@ class DiagnosticsAndCommandTest {
     }
 
     @Test
+    fun occupancyCallbacksAndMovesAreAttributedWithTheirLabel() {
+        val probe = FakeProbe().also { it.capturing = true; it.due = true }
+        start(FakeDiagnostics(probe))
+        val occ = triggers.labelled("owner:station").occupancy(owner, Area.box(world, 0, 60, 0, 5, 70, 5), object : OccupancyHandler {})
+        val p = server.addPlayer()
+        p.teleport(Location(world, 20.5, 64.0, 2.5))
+        p.simulatePlayerMove(Location(world, 2.5, 64.0, 2.5))
+        occ.moveTo(Area.box(world, 100, 60, 0, 105, 70, 5))
+        for (name in listOf("first-in", "enter", "exit", "last-out")) {
+            assertTrue("handler.owner.occupancy-$name.owner:station" in probe.sections, probe.sections.toString())
+        }
+        assertTrue("area-index.move" in probe.sections, probe.sections.toString())
+        assertEquals(0, probe.nestingErrors)
+        server.scheduler.performTicks(20)
+        assertEquals(1L, probe.levels["subscriptions.by-kind.occupancy"])
+        assertEquals(1L, probe.levels["subscriptions.by-owner.owner.occupancy"])
+    }
+
+    @Test
     fun sneakyDiagnosticsInstalledAfterStartupGetsTheSamplerAndAttribution() {
         start(null)
         assertEquals(0, server.scheduler.pendingTasks.count { it.owner === su })

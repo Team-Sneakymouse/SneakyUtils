@@ -1,4 +1,4 @@
-# Triggers: areas, watches, timers, clicks and signals
+# Triggers: areas, occupancy, watches, timers, clicks and signals
 
 `com.sneakyutils.triggers` is a shared trigger service. SneakyUtils listens to each frequent event once (movement,
 clicks, breaks, ticks) and hands it only to the subscriptions that can apply. It replaces MagicSpells passive
@@ -14,10 +14,11 @@ are single-method interfaces, options use builders.
 
 ## Rules for every call
 
-- **Don't implement `Triggers`, `Subscription` or `PlayerTimer`.** Only SneakyUtils implements them; later additions
-  come as default methods, but other implementations aren't supported. In tests, load SneakyUtils in MockBukkit, or
-  put the few calls you make behind your own interface and fake that. Handler interfaces (`AreaHandler`,
-  `StepHandler`, `BlockClickHandler`, ...) are yours to implement: anything added to them later is a default method.
+- **Don't implement `Triggers`, `Subscription`, `PlayerTimer` or `Occupancy`.** Only SneakyUtils implements them; later
+  additions come as default methods, but other implementations aren't supported. In tests, load SneakyUtils in
+  MockBukkit, or put the few calls you make behind your own interface and fake that. Handler interfaces (`AreaHandler`,
+  `OccupancyHandler`, `StepHandler`, `BlockClickHandler`, ...) are yours to implement: anything added to them later is
+  a default method.
 - **Server thread only.** Every method throws `IllegalStateException` on another thread. Handlers run on the server
   thread; do database, HTTP and file work in your own async tasks.
 - **Owned by your plugin.** Pass your enabled plugin as `owner`. Everything you subscribe closes when your plugin
@@ -90,8 +91,142 @@ triggers.area(plugin, Area.box(world, 100, 60, -20, 110, 70, -12),
   the predicate refines it. The predicate runs during movement: keep it cheap and side-effect free (no teleports, no
   subscribing or closing; those are dropped or rejected, and a rejected `close()` leaves the subscription active).
   SneakyUtils has no WorldGuard dependency; build the predicate yourself.
+- **Spheres and cylinders** are built-in custom shapes. `Area.sphere(world, x, y, z, radius)` (or a `Vector` or
+  `Location` centre): positions at most `radius` from the centre. `Area.cylinder(world, x, y, z, radius, height)`: an
+  upright cylinder **standing on** the centre, from `y` up to `y + height`, horizontal distance at most `radius`. The
+  surface, base and top count as inside. Players are tested at their feet position, and like every area only when
+  their block changes, so a boundary that runs through a block is checked as they step into or out of that block.
+  The box is every block the shape reaches (a sphere of radius up to about 500 fits the chunk limit).
+- **Moving a shape**: `area.translate(dx, dy, dz)` returns a copy moved by whole blocks (box and shape together; a
+  custom predicate keeps its own coordinates). A move that would leave the int block range throws
+  `IllegalArgumentException`, as does a sphere or cylinder reaching past it. For fractional moves build the shape again
+  at its new centre.
 - **Limits**: an area may span at most 64 x 64 chunks. Areas are keyed by world UUID; unloading a world closes its
   areas.
+
+## Occupancy
+
+Who is inside an area, kept by the service: "is anyone at the board / in the mansion / near the toaster?" without an
+enter and exit set of your own or a loop over every player. The handler hears when the first player comes in and the
+last one leaves; the handle reads the count and the players, and can move the area (moving stations).
+
+```kotlin
+val toaster = triggers.occupancy(this, Area.sphere(block.location.toCenterLocation(), 4.0), object : OccupancyHandler {
+    override fun onFirstIn(occupancy: Occupancy, player: Player, cause: OccupancyCause) { hum.start() }
+    override fun onLastOut(occupancy: Occupancy, player: Player, cause: OccupancyCause) { hum.stop() }
+})
+if (toaster.isOccupied) toaster.players.forEach { warm(it) }   // players: a snapshot
+```
+
+```java
+Occupancy board = triggers.occupancy(plugin, Area.cylinder(boardFoot, 6.0, 4.0),
+    OccupancyHandler.of((occ, p, cause) -> showBoard(), (occ, p, cause) -> hideBoard()),
+    OccupancyOptions.builder().label("jobboard:board").build());
+int nearby = board.getCount();
+boolean here = board.contains(player);
+```
+
+- **Calls** (`OccupancyHandler`, all default empty; `OccupancyHandler.of(firstIn, lastOut)` or
+  `of(firstIn, lastOut, enter, exit)` for lambdas): `onFirstIn` when the count goes 0 -> 1, just before that player's
+  `onEnter`; `onLastOut` when it goes 1 -> 0, just after that player's `onExit`; `onEnter` / `onExit` for every
+  player. Each gets the occupancy, the player and an `OccupancyCause`: the area causes (`MOVE`, `VEHICLE`, `TELEPORT`,
+  `JOIN`, `WORLD_CHANGE`, `REGISTER`, `QUIT`, `UNREGISTER`, `DEATH`) plus `GAME_MODE` and `AREA_MOVED`. For one player
+  the calls alternate enter, exit, as for areas.
+- **The handle** (`Occupancy`, a `Subscription`): `count`, `isOccupied`, `contains(player)` (no allocation), `players`
+  (a new unmodifiable snapshot each call, in the order they entered: safe to iterate while moving players; don't keep
+  it past the tick), `area`, `moveTo`, `translate`, `close`. It follows the calls delivered: a player counts from their
+  `onEnter` to their `onExit`, so the count goes 0 -> 1 exactly when `onFirstIn` runs. Inside a handler, what another
+  call set off (a teleport, a move, a close) shows from its own calls, which come after the current one.
+- **Who counts** (`OccupancyOptions.builder()`, defaults in brackets):
+  - `riders` [`ALLOW`: riders count; `SKIP`, `ONLY` as for areas, deciding entering only].
+  - `includeSpectators` [false]. Unlike areas this holds all the time: a member who switches to spectator leaves
+    (`GAME_MODE`), and switching back while still inside enters again (`GAME_MODE`). A spectator walking in isn't
+    counted. A dead member who is switched to spectator leaves at once too (`GAME_MODE`); switching back while dead
+    enters nothing until the respawn. The change is applied when its event fires and checked against the player's real
+    mode on the next tick, so a handler that changes the mode again during it (the outer change wins), or a listener
+    that cancels it late, is corrected then (for areas' spectator gate as well).
+  - `countDead` [true]: a member who dies stays counted until they respawn outside the area (exit `TELEPORT`; respawning
+    inside keeps them in without calls), quit (`QUIT`), change world (`WORLD_CHANGE`), or the area moves off them
+    (`AREA_MOVED`). With false they leave on death (`DEATH`), as in areas. A player already dead when the occupancy is
+    made, or who joins dead, enters at their respawn.
+  - `label` [none], as for every subscription.
+- **No silent stays.** Players already inside enter at once (`REGISTER`, before `occupancy(...)` returns unless it is
+  called from a handler), and players joining inside enter (`JOIN`), so the count is always right.
+- **When a shaped occupancy is re-tested** (sphere, cylinder, custom), and the one accepted limit:
+  - on **block steps** (every reported change of block, as for areas);
+  - on **teleport events**, also when the player stays in the same block (cause `TELEPORT`; `VEHICLE` for a rider
+    carried by the teleport and `MOVE` for a dismount, as areas classify them), and on the next-tick correction after a
+    handler teleported the player during their own teleport (same causes: `VEHICLE` for a rider). After a correction
+    the members and counts are exact; the cause on its enter or exit is that of the teleport event that scheduled it,
+    on a best-effort basis;
+  - on the **explicit evaluations**: registering it, `moveTo` / `translate` (also `moveTo(occupancy.area)`), any game
+    mode change (also one that has nothing to do with spectator, such as survival to creative), a mount or dismount,
+    and the respawn; a death takes members out only with `countDead` off.
+  - **Not** on plain walking or riding within one block: a player who crosses a shape's boundary without changing
+    block is counted, or not, as at their last test, until the next of the above. Box occupancies depend on the block
+    only, so this never shows for them. If a small shape must follow players within a block, re-test it yourself with
+    `moveTo(occupancy.area)` when it matters.
+  - **Riders and the poll.** The explicit evaluations use each player's last reported block. A rider's position is
+    reported by the riding poll, once a tick (riders make no move events), so a rider who crossed into another block
+    since the last poll is evaluated at the block they were in; the next poll, at most one tick later, reports the new
+    block as a step and enters or exits them then (cause `VEHICLE`). A `moveTo` onto a rider can therefore return
+    before their `onFirstIn`, which follows within a tick. Areas have the same one-tick lag for riders.
+- **Where players are tested.** At the exact position at that moment: the reported one for steps and teleports, the
+  player's current one for the explicit evaluations (a player whose own move, teleport or respawn is being handled:
+  that event's destination). This is for occupancies only: areas, pass-through paths and watches are tested at the
+  last reported step, with or without occupancies around. A member found outside by an explicit evaluation (they
+  walked out of a small shape without changing block) leaves with the cause of what found them: `GAME_MODE` when they
+  turned spectator (only then: the mode change itself is why they stop counting), `MOVE` or `VEHICLE` (on foot or
+  riding) for any other game mode change, as they left by moving, and the same for a player such a change finds
+  inside (also a spectator switch, for an occupancy that includes spectators; and a mount or dismount, for one whose
+  rider policy takes both: on foot before a mount, riding before a dismount); `MOVE` when they mount (they left on foot), `VEHICLE` when they dismount, `AREA_MOVED` for a `moveTo`; a member who dies with `countDead` off leaves with `DEATH` wherever they stand, and with `countDead` on
+  stays until the respawn is evaluated.
+- **Lifecycle** as for areas: owned by your plugin and closed silently when it disables (nothing reaches it, the handle
+  empties); `close()` is idempotent and takes everyone out (`onExit`, then `onLastOut`, cause `UNREGISTER`); unloading
+  the area's world closes it. `/triggers` lists it as kind `occupancy` (and in the area chunk entries). A handler that
+  disables its own plugin (or the occupancy's owner) gets no further call, even the second half of a pair (`onEnter`
+  after `onFirstIn`, `onLastOut` after `onExit`); one that only closes the occupancy still gets it.
+- **Handler loops.** When one event sets off more than the 10,000 calls a drain allows (see the rules above), the rest
+  are dropped, occupancy calls included: `onEnter`, `onExit`, `onFirstIn` and `onLastOut` that were still queued are
+  skipped. The occupancy's count and players are then set to the engine's actual membership, silently, so they stay
+  right; a first-in or last-out that fell in the dropped part is not called later.
+
+### Re-anchoring (moving stations)
+
+`occupancy.moveTo(newArea)` (or `translate(dx, dy, dz)`) replaces the area at once:
+
+- Players inside both the old and the new area stay inside, with no calls. Players only in the new area enter, players
+  only in the old one exit, both with cause `AREA_MOVED`.
+- Enters are delivered before exits, so `onFirstIn` and `onLastOut` fire only on real 0 <-> 1 changes: a move that
+  swaps one player for another calls neither.
+- The usual rules decide who enters (riders, spectators; dead players don't enter, but a dead member stays while the
+  new area still holds their position).
+- Players are tested where they are now. For a sphere, cylinder or custom shape that is their current exact position
+  (the engine otherwise stores it only on block steps); a player whose own move, teleport or respawn is being handled
+  (`moveTo` from that handler) is tested at the destination of that event (also a teleport within the same block).
+  Boxes depend on the block only. Passing the current area again (`moveTo(occupancy.area)`) re-evaluates who is inside
+  without touching the index.
+- The new area may be in another world: everyone in the old world exits. Any shape works.
+- From a handler it takes effect at once and its calls come after the current one; inside an area predicate it throws
+  `IllegalStateException`, as on a closed occupancy.
+
+```kotlin
+// A station flying along x, one block a tick, from a timer that runs while it flies.
+val station = triggers.occupancy(this, Area.cylinder(deck, 12.0, 6.0), crew)
+val flight = triggers.every(this, 1) { station.translate(1, 0, 0) }
+```
+
+**Carried players.** Players riding along are re-evaluated when their own position is reported (the move event or the
+1-tick riding poll), which may come before or after your `moveTo` in a tick. Make a moving area larger than its deck by
+at least what it moves in a tick, so a carried player never sits outside it between the two updates (that would be an
+exit and an enter).
+
+**Cost.** Block steps cost what an area's do: an occupancy is one entry in the chunk index, and a member's step adds a
+field read for the spectator rule. Nothing runs per tick unless you move it. A `moveTo` is one box test per online
+player (and the shape test for those in the box), a second pass over the online players when the area had members,
+and index updates only for the chunks the area starts or stops touching: none for a move inside the same chunks, a
+column or row of chunks when it crosses a chunk border. Calling it every tick for a few moving stations is fine;
+hundreds of stations moving every tick with many players online is not what it is for.
 
 ## Per-player watches
 
@@ -385,8 +520,8 @@ triggers.area(this, pad, padHandler, AreaOptions.builder().label("myplugin:forge
 SneakyUtils.getTriggers().every(this, 20, task, TimerOptions.builder().label("myplugin:cleanup").build())
 ```
 
-- Every options type (`AreaOptions`, `WatchOptions`, `PlayerTimerOptions`, `ClickOptions`, `BreakOptions`,
-  `BlockRemovedOptions`, `TimerOptions` for `every`) has `.label(...)`. `Triggers.labelled(label)` returns a view that labels everything
+- Every options type (`AreaOptions`, `OccupancyOptions`, `WatchOptions`, `PlayerTimerOptions`, `ClickOptions`,
+  `BreakOptions`, `BlockRemovedOptions`, `TimerOptions` for `every`) has `.label(...)`. `Triggers.labelled(label)` returns a view that labels everything
   made through it whose options have no label; keep one per feature. `loadTable` through a view is not labelled.
 - A label is 1 to 64 characters of `a-z 0-9 . _ : -`, starting with a letter or digit (`TriggerLabels`); anything else
   throws `IllegalArgumentException`. Prefix it with your plugin or feature (`holdover:forge-bellow`).
@@ -407,7 +542,7 @@ instrumentation `sneakyutils-ticks-2`, in the shared `sneakydiagnostics.probe/1`
 
 | Section | What |
 |---|---|
-| `handler.<owner>.<callback>[.<label>]` | one subscription's handler calls; `<owner>` is the plugin name in lower case, `<callback>` is `area-enter`, `area-exit`, `area-step`, `step-watch`, `block-under`, `block-watch`, `timer`, `player-timer`, `player-timer-all-online`, `block-click`, `block-type`, `block-break`, `block-break-type`, `block-removed` or `entity-click` |
+| `handler.<owner>.<callback>[.<label>]` | one subscription's handler calls; `<owner>` is the plugin name in lower case, `<callback>` is `area-enter`, `area-exit`, `area-step`, `occupancy-first-in`, `occupancy-last-out`, `occupancy-enter`, `occupancy-exit`, `step-watch`, `block-under`, `block-watch`, `timer`, `player-timer`, `player-timer-all-online`, `block-click`, `block-type`, `block-break`, `block-break-type`, `block-removed` or `entity-click` |
 | `move` | a PlayerMoveEvent that changed block: area lookup, watch checks and (nested) the delivery |
 | `teleport` | a teleport (including riders moved by teleport and dismounts) |
 | `player-state` | join, quit, death, respawn, world change, game mode change |
@@ -416,7 +551,8 @@ instrumentation `sneakyutils-ticks-2`, in the shared `sneakydiagnostics.probe/1`
 | `tick`, `tick.mounted-poll`, `tick.timers` | the 1-tick ticker: riders polled, timers run |
 | `click.block`, `click.break`, `click.entity` | a click, break or entity click that matched subscriptions |
 | `block.removed` | a removal event that touched watched blocks (all of them, for an explosion or piston) |
-| `area-index.add`, `area-index.remove` | registering and closing areas (index updates, `fireOnRegister` enters nested) |
+| `area-index.add`, `area-index.remove` | registering and closing areas and occupancies (index updates, `fireOnRegister` enters nested) |
+| `area-index.move` | an occupancy's `moveTo` (index updates, re-evaluation; its calls nested) |
 | `handler.other` | handler calls past the name budget (below) |
 
 A handler's section is nested in the stage that delivered it, so a stage's `selfNanos` is SneakyUtils' own cost and
@@ -426,12 +562,14 @@ cost, wherever they ran.
 **Counts:** the always-on counters, once a second as the change since the last second (`events.move`, `steps`,
 `steps.noop`, `area.enters`, `area.exits`, `handler.calls`, `handler.errors`, `handler.slow`, `queue.dropped`,
 `queue.self-triggered`, `reentrant.dropped`, `predicate.errors`, `events.block-removed`, `block-removed.lookups`, ...); and per subscriber, under the handler's name:
-`handler.errors.<owner>.<callback>[.<label>]` (a throw; `area-predicate` for a custom area's predicate),
+`handler.errors.<owner>.<callback>[.<label>]` (a throw; `area-predicate` or `occupancy-predicate` for a custom
+shape's predicate),
 `handler.slow.<...>` (a call of 1 ms or more), `handler.self-skipped.<...>` (calls skipped because that subscription's
 own handler caused them), `queue.dropped.after.<owner>.<kind>[.<label>]` (events dropped by the loop limit, after
 that subscription's handler ran last). `diagnostics.names-folded` counts names folded by the budget.
 
-**Levels** (once a second): `players.tracked`, `players.riding`, `players.watched`, `areas`, `areas.chunks`,
+**Levels** (once a second): `players.tracked`, `players.riding`, `players.watched`, `areas` and `areas.chunks` (with
+occupancies),
 `timers`, `timers.per-player`, `timers.per-player.players`, `timers.all-online`, `subscriptions`,
 `subscriptions.by-kind.<kind>`, `subscriptions.by-owner.<owner>.<kind>` (the first 200 pairs of the capture; the rest
 in `subscriptions.by-owner.other`).

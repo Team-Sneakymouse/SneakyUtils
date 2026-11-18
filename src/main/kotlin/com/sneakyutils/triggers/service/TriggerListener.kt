@@ -106,10 +106,22 @@ internal class TriggerListener(private val service: TriggerService) : Listener {
         service.respawned(event.player, world.uid, loc.x, loc.y, loc.z)
     }
 
+    /**
+     * The event comes before the mode changes: the proposed mode is applied here, and checked against the player's
+     * real mode on the next tick ([TriggerService.gameModeEvent]), because a handler called from here may change the
+     * mode again (the outer change then wins) and a later listener may still cancel. Cancelled changes don't get here.
+     */
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     fun onGameMode(event: PlayerGameModeChangeEvent) {
         val s = core.state(event.player.uniqueId) ?: return
-        service.stage(TriggerService.STAGE_PLAYER, "player-state") { core.setSpectator(s, event.newGameMode == GameMode.SPECTATOR) }
+        service.gameModeEvent(event.player)
+        service.stage(TriggerService.STAGE_PLAYER, "player-state") {
+            val spectator = event.newGameMode == GameMode.SPECTATOR
+            service.refineForShapes(s) // shaped occupancies are tested where the player is now
+            // Into or out of spectator: the full refresh. Any other change (survival to creative): shaped occupancies
+            // only; areas hear nothing of it, as before.
+            if (s.spectator != spectator) core.setSpectator(s, spectator) else core.retestShapedOccupancies(s)
+        }
     }
 
     @EventHandler(priority = EventPriority.MONITOR)

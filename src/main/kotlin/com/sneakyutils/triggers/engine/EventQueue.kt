@@ -3,6 +3,7 @@ package com.sneakyutils.triggers.engine
 import com.sneakyutils.triggers.AreaCause
 import com.sneakyutils.triggers.BlockKey
 import com.sneakyutils.triggers.BlockMatch
+import com.sneakyutils.triggers.OccupancyCause
 import org.bukkit.Material
 import java.util.UUID
 
@@ -17,6 +18,20 @@ import java.util.UUID
 internal interface EngineSink {
     fun enter(state: PlayerState, reg: AreaReg, cause: AreaCause)
     fun exit(state: PlayerState, reg: AreaReg, cause: AreaCause)
+
+    /**
+     * An occupancy's enter ([entered]) or exit, in place of [enter] / [exit] for a registration with
+     * [AreaReg.occupancy]. Same delivery rules as enter and exit.
+     */
+    fun occupancy(state: PlayerState, reg: AreaReg, entered: Boolean, cause: OccupancyCause) {}
+
+    /**
+     * The per-drain limit dropped enters or exits of these occupancies (each once), after [eventsDropped]. The engine's
+     * membership is already final; the sink brings what it derived from delivered calls back in line, without calling
+     * handlers (that could restart the loop).
+     */
+    fun occupanciesDropped(regs: List<AreaReg>) {}
+
     /** A block step inside [reg]; [cause] is MOVE, VEHICLE or TELEPORT (see [AreaCause]). */
     fun areaStep(state: PlayerState, reg: AreaReg, cause: AreaCause)
     fun step(state: PlayerState, watch: StepWatch, from: BlockKey, to: BlockKey, mounted: Boolean)
@@ -70,6 +85,9 @@ internal class QueuedEvent {
     @JvmField var reg: AreaReg? = null
     @JvmField var watch: Watch? = null
     @JvmField var cause: AreaCause? = null
+
+    /** For an occupancy's enter or exit: the cause its handler gets (see [EngineSink.occupancy]); null otherwise. */
+    @JvmField var occ: OccupancyCause? = null
     @JvmField var from: BlockKey? = null
     @JvmField var to: BlockKey? = null
     @JvmField var mounted: Boolean = false
@@ -87,6 +105,7 @@ internal class QueuedEvent {
         reg = null
         watch = null
         cause = null
+        occ = null
         from = null
         to = null
         match = null
@@ -203,16 +222,19 @@ internal class EventQueue(private val sink: EngineSink, private val maxPerDrain:
         buffer = Array(old.size * 2) { if (it < old.size) old[it] else QueuedEvent() }
     }
 
-    fun enter(state: PlayerState, reg: AreaReg, cause: AreaCause) {
+    /** [occ]: set for an occupancy's registration (delivered through [EngineSink.occupancy]). */
+    fun enter(state: PlayerState, reg: AreaReg, cause: AreaCause, occ: OccupancyCause? = null) {
         val e = next(ENTER, state)
         e.reg = reg
         e.cause = cause
+        e.occ = occ
     }
 
-    fun exit(state: PlayerState, reg: AreaReg, cause: AreaCause) {
+    fun exit(state: PlayerState, reg: AreaReg, cause: AreaCause, occ: OccupancyCause? = null) {
         val e = next(EXIT, state)
         e.reg = reg
         e.cause = cause
+        e.occ = occ
     }
 
     fun areaStep(state: PlayerState, reg: AreaReg, cause: AreaCause) {
@@ -251,8 +273,10 @@ internal class EventQueue(private val sink: EngineSink, private val maxPerDrain:
                 if (delivered == maxPerDrain) {
                     val n = tail - head
                     dropped += n
+                    val occupancies = droppedOccupancies()
                     discard()
                     sink.eventsDropped(n, if (logSize > 0) logSubject[logSize - 1] else null)
+                    if (occupancies != null) sink.occupanciesDropped(occupancies)
                     break
                 }
                 val e = buffer[head++]
@@ -265,6 +289,24 @@ internal class EventQueue(private val sink: EngineSink, private val maxPerDrain:
             draining = false
             sink.afterDelivery(token)
         }
+    }
+
+    /**
+     * The occupancies with an enter or exit still queued, each once in the order first seen, or null. Rare path (a
+     * drain over its limit); an identity set does the duplicate check, so it stays linear in the queued events.
+     */
+    private fun droppedOccupancies(): List<AreaReg>? {
+        var out: ArrayList<AreaReg>? = null
+        var seen: java.util.IdentityHashMap<AreaReg, Boolean>? = null
+        for (i in head until tail) {
+            val e = buffer[i]
+            if (e.occ == null) continue
+            val reg = e.reg ?: continue
+            val set = seen ?: java.util.IdentityHashMap<AreaReg, Boolean>().also { seen = it }
+            if (set.put(reg, true) != null) continue
+            (out ?: ArrayList<AreaReg>().also { out = it }).add(reg)
+        }
+        return out
     }
 
     /** Drops every queued event without delivering it. */
@@ -284,6 +326,7 @@ internal class EventQueue(private val sink: EngineSink, private val maxPerDrain:
         val reg = e.reg
         val watch = e.watch
         val cause = e.cause
+        val occ = e.occ
         val from = e.from
         val to = e.to
         val mounted = e.mounted
@@ -309,8 +352,8 @@ internal class EventQueue(private val sink: EngineSink, private val maxPerDrain:
         currentCause = log(subject, s.uuid, causedBy)
         try {
             when (kind) {
-                ENTER -> sink.enter(s, reg!!, cause!!)
-                EXIT -> sink.exit(s, reg!!, cause!!)
+                ENTER -> if (occ != null) sink.occupancy(s, reg!!, true, occ) else sink.enter(s, reg!!, cause!!)
+                EXIT -> if (occ != null) sink.occupancy(s, reg!!, false, occ) else sink.exit(s, reg!!, cause!!)
                 AREA_STEP -> sink.areaStep(s, reg!!, cause!!)
                 STEP -> sink.step(s, watch as StepWatch, from!!, to!!, mounted)
                 BLOCK -> sink.blockWatch(s, watch as BlockWatch, worldId!!, x, y, z, match!!)

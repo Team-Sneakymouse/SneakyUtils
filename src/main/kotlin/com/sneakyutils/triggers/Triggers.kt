@@ -20,7 +20,7 @@ import java.io.File
  *
  * Optional arguments are explicit overloads (no Kotlin default arguments), so Java callers get the same API.
  *
- * Implemented by SneakyUtils only: don't implement this interface (or [Subscription] or [PlayerTimer]) in a plugin.
+ * Implemented by SneakyUtils only: don't implement this interface (or [Subscription], [PlayerTimer] or [Occupancy]) in a plugin.
  * Methods added later come as default methods, but only SneakyUtils' implementation is supported; in tests, load
  * SneakyUtils in MockBukkit, or put the calls you need behind your own small interface and fake that.
  */
@@ -33,6 +33,23 @@ interface Triggers {
 
     fun area(owner: Plugin, area: Area, handler: AreaHandler): Subscription =
         area(owner, area, handler, AreaOptions.DEFAULT)
+
+    // ---- occupancy
+
+    /**
+     * Keeps who is inside [area] and calls [handler] when the first player comes in and the last one leaves (and,
+     * optionally, on each enter and exit). Players already inside enter at once ([OccupancyCause.REGISTER]), before
+     * this returns unless called from a handler. The returned [Occupancy] reads the count and players and can move the
+     * area ([Occupancy.moveTo]). By default riders count, spectators don't, and dead players stay counted until they
+     * respawn elsewhere ([OccupancyOptions]).
+     *
+     * A default method, for implementations from before occupancy: they refuse it.
+     */
+    fun occupancy(owner: Plugin, area: Area, handler: OccupancyHandler, options: OccupancyOptions): Occupancy =
+        throw UnsupportedOperationException("this Triggers implementation has no occupancy")
+
+    fun occupancy(owner: Plugin, area: Area, handler: OccupancyHandler): Occupancy =
+        occupancy(owner, area, handler, OccupancyOptions.DEFAULT)
 
     // ---- per-player watches
 

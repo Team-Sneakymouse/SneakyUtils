@@ -6,6 +6,8 @@ import com.sneakyutils.triggers.AreaOptions
 import com.sneakyutils.triggers.BlockKey
 import com.sneakyutils.triggers.BlockMatch
 import com.sneakyutils.triggers.BlockOffset
+import com.sneakyutils.triggers.OccupancyCause
+import com.sneakyutils.triggers.OccupancyOptions
 import com.sneakyutils.triggers.WatchOptions
 import org.bukkit.Material
 import java.util.UUID
@@ -33,6 +35,8 @@ internal class RecordingSink : EngineSink {
 
     override fun enter(state: PlayerState, reg: AreaReg, cause: AreaCause) = record("enter ${n(reg)} ${n(state)} $cause")
     override fun exit(state: PlayerState, reg: AreaReg, cause: AreaCause) = record("exit ${n(reg)} ${n(state)} $cause")
+    override fun occupancy(state: PlayerState, reg: AreaReg, entered: Boolean, cause: OccupancyCause) =
+        record("${if (entered) "in" else "out"} ${n(reg)} ${n(state)} $cause")
     override fun areaStep(state: PlayerState, reg: AreaReg, cause: AreaCause) = record("inside ${n(reg)} ${n(state)} $cause")
     override fun step(state: PlayerState, watch: StepWatch, from: BlockKey, to: BlockKey, mounted: Boolean) =
         record("step ${n(watch)} ${n(state)} ${from.x},${from.y},${from.z}->${to.x},${to.y},${to.z}${if (mounted) " mounted" else ""}")
@@ -69,6 +73,16 @@ internal class EngineFixture(maxEvents: Int = EventQueue.DEFAULT_MAX_PER_DRAIN) 
 
     fun add(name: String, area: Area, options: AreaOptions = AreaOptions.DEFAULT): AreaReg {
         val reg = AreaReg(area, options)
+        sink.names[reg] = name
+        core.addArea(reg)
+        return reg
+    }
+
+    /** An occupancy's registration, as the service makes it (every stay announced). */
+    fun occupancy(name: String, area: Area, options: OccupancyOptions = OccupancyOptions.DEFAULT): AreaReg {
+        val o = AreaOptions.builder().riders(options.riders).includeSpectators(options.includeSpectators)
+            .fireOnJoin(true).fireOnRegister(true).build()
+        val reg = AreaReg(area, o, options)
         sink.names[reg] = name
         core.addArea(reg)
         return reg

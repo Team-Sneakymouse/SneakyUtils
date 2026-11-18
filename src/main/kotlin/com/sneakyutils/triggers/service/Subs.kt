@@ -101,7 +101,11 @@ internal abstract class SubBase(
 
         /** The subscription as a whole (its kind), for what isn't one callback's (dropped events). */
         const val CB_ANY = 4
-        const val CALLBACKS = 5
+
+        /** An occupancy's first-in and last-out (its enter and exit use [CB_ENTER] and [CB_EXIT]). */
+        const val CB_FIRST_IN = 5
+        const val CB_LAST_OUT = 6
+        const val CALLBACKS = 7
     }
 }
 

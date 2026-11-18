@@ -2,6 +2,7 @@ package com.sneakyutils.triggers.engine
 
 import com.sneakyutils.triggers.Area
 import com.sneakyutils.triggers.AreaOptions
+import com.sneakyutils.triggers.OccupancyOptions
 import com.sneakyutils.triggers.WatchOptions
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertTrue
@@ -78,6 +79,36 @@ class NoOpAllocationTest {
         val setup = Setup(mounted = false, footWatch = false)
         measure(setup)
         assertEquals(setup.core.steps, setup.core.noopSteps)
+    }
+
+    @Test
+    fun stepsInsideOccupanciesDoNotAllocate() {
+        // 100 players walking inside two occupancies (a box and a ball around them): every step re-checks both
+        // memberships (box test, ball predicate, spectator rule) and changes nothing, like an area's steps inside.
+        val world = UUID.randomUUID()
+        val sink = RecordingSink()
+        val core = MovementCore(AreaIndex(), sink)
+        val o = AreaOptions.builder().riders(com.sneakyutils.triggers.RiderPolicy.ALLOW).fireOnJoin(true).fireOnRegister(true).build()
+        core.addArea(AreaReg(Area.box(world, 0, 0, 0, 1023, 255, 1023), o, OccupancyOptions.DEFAULT))
+        core.addArea(AreaReg(Area.sphere(world, 512.0, 64.0, 512.0, 500.0), o, OccupancyOptions.DEFAULT))
+        val states = (0 until 100).map { core.join(UUID.randomUUID(), null, world, 300.5, 64.0, 300.5 + it, false, false) }
+        sink.log.clear()
+        fun run(n: Int, offset: Int) {
+            for (i in 0 until n) {
+                val s = states[i % 100]
+                core.position(s, world, 300.5 + ((i / 100 + offset) % 400), 64.0, s.pz, false)
+            }
+        }
+        repeat(5) { run(200_000, it * 2000) }
+        val before = allocated()
+        val t0 = System.nanoTime()
+        run(1_000_000, 777)
+        val nanos = System.nanoTime() - t0
+        val bytes = allocated() - before
+        assertTrue(bytes < 16 * 1024, "1,000,000 steps inside occupancies allocated $bytes bytes")
+        assertTrue(nanos < 2_000_000_000L, "1,000,000 steps inside occupancies took ${nanos / 1_000_000} ms")
+        assertTrue(sink.log.isEmpty())
+        assertTrue(states.all { it.memberCount == 2 })
     }
 
     @Test

@@ -1,9 +1,11 @@
 package com.sneakyutils.triggers.engine
 
+import com.sneakyutils.triggers.Area
 import com.sneakyutils.triggers.AreaCause
 import com.sneakyutils.triggers.BlockKey
 import com.sneakyutils.triggers.BlockMatch
 import com.sneakyutils.triggers.BlockOffset
+import com.sneakyutils.triggers.OccupancyCause
 import com.sneakyutils.triggers.RiderPolicy
 import org.bukkit.Material
 import org.bukkit.entity.Player
@@ -79,6 +81,26 @@ internal class MovementCore(
     /** Players (online or not) with at least one watch; for leak tests. */
     internal val watchedPlayerCount: Int get() = watchesByPlayer.size
 
+    /** Online players' states, live (no copy): iterate only where nothing can join or quit meanwhile. */
+    internal val liveStates: Collection<PlayerState> get() = players.values
+
+    /**
+     * Sets the exact position occupancies are tested at ([PlayerState.lx], ly, lz) to ([x], [y], [z]) when that is in
+     * the block and world already stored (moves within a block aren't reported; see
+     * [com.sneakyutils.triggers.service.TriggerService]). The step position (px, py, pz), which areas are tested at
+     * and pass-through paths start from, is never touched: only movement reports write it. Changes no membership; a
+     * position in another block is left for its own report. Returns whether it applied.
+     */
+    fun refinePosition(s: PlayerState, worldId: UUID, x: Double, y: Double, z: Double): Boolean {
+        if (s.removed || evaluating || worldId != s.worldId) return false
+        if (!x.isFinite() || !y.isFinite() || !z.isFinite()) return false
+        if (Geometry.blockOf(x) != s.bx || Geometry.blockOf(y) != s.by || Geometry.blockOf(z) != s.bz) return false
+        s.lx = x
+        s.ly = y
+        s.lz = z
+        return true
+    }
+
     /** Online players' states; allocates a copy. */
     fun states(): List<PlayerState> = ArrayList(players.values)
 
@@ -90,7 +112,16 @@ internal class MovementCore(
         position(s, worldId, x, y, z, teleport)
     }
 
-    fun position(s: PlayerState, worldId: UUID, x: Double, y: Double, z: Double, teleport: Boolean) {
+    /**
+     * [teleport] is how areas, watches and path checks classify the report (false for a rider carried by a teleport,
+     * or a dismount). [shapeRetest] is set when the report came from a teleport event (or the resync after one),
+     * whatever that classification: it only makes a report that stays in the block test shaped occupancies again,
+     * with this cause (TELEPORT, or VEHICLE / MOVE as the service classifies the teleport; null: no re-test).
+     */
+    fun position(
+        s: PlayerState, worldId: UUID, x: Double, y: Double, z: Double, teleport: Boolean,
+        shapeRetest: AreaCause? = if (teleport) AreaCause.TELEPORT else null,
+    ) {
         if (s.removed) return
         if (!x.isFinite() || !y.isFinite() || !z.isFinite()) return
         if (evaluating) {
@@ -101,7 +132,23 @@ internal class MovementCore(
         val nby = Geometry.blockOf(y)
         val nbz = Geometry.blockOf(z)
         if (worldId == s.worldId) {
-            if (nbx == s.bx && nby == s.by && nbz == s.bz) return
+            if (nbx == s.bx && nby == s.by && nbz == s.bz) {
+                // Same block: no step, and px/py/pz stay the last step's (pass-through paths start there). The exact
+                // report is kept apart, so an explicit evaluation from a handler (an occupancy moved onto a shape)
+                // can use where a same-block teleport put the player.
+                s.lx = x
+                s.ly = y
+                s.lz = z
+                // A teleport inside the block (or the resync that corrects a nested one) is not a walk within the
+                // block: shaped occupancies are tested again at the exact position, every time (also when the
+                // coordinates equal the stored ones: a refresh may have stored them without testing every occupancy).
+                // Nothing else is tested.
+                if (shapeRetest != null && !s.dead && index.shapedOccupancies > 0) {
+                    evaluateShapedOccupancies(s, shapeRetest)
+                    queue.drain()
+                }
+                return
+            }
             moveWithinWorld(s, nbx, nby, nbz, x, y, z, teleport)
         } else {
             changeWorld(s, worldId, nbx, nby, nbz, x, y, z)
@@ -124,6 +171,9 @@ internal class MovementCore(
         s.py = y
         s.pz = z
         s.keyObj = null
+        s.lx = x
+        s.ly = y
+        s.lz = z
         val ck = Geometry.chunkKey(nbx shr 4, nbz shr 4)
         val crossedChunk = ck != s.chunkKey
         if (crossedChunk || s.indexVersion != index.version) refreshAreas(s, ck)
@@ -178,6 +228,9 @@ internal class MovementCore(
         s.px = x
         s.py = y
         s.pz = z
+        s.lx = x
+        s.ly = y
+        s.lz = z
         s.keyObj = null
         s.indexVersion = -1 // force the world lookup
         refreshAreas(s, Geometry.chunkKey(nbx shr 4, nbz shr 4))
@@ -332,13 +385,10 @@ internal class MovementCore(
         try {
             for (s in players.values) {
                 if (s.worldId != a.worldId || s.dead || !a.boxContains(s.bx, s.by, s.bz)) continue
-                if (!mayEnter(reg, s) || !predicate(reg, s.px, s.py, s.pz)) continue
+                if (!mayEnter(reg, s) || !shape(reg, s, s.px, s.py, s.pz)) continue
                 val silent = !reg.options.fireOnRegister
                 addMember(s, reg, silent, st)
-                if (!silent) {
-                    queue.enter(s, reg, AreaCause.REGISTER)
-                    enters++
-                }
+                if (!silent) queueEnter(s, reg, AreaCause.REGISTER)
             }
         } finally {
             endEvaluation()
@@ -393,10 +443,7 @@ internal class MovementCore(
                     }
                     val wasSilent = s.memberSilent[i]
                     removeMemberAt(s, i)
-                    if (!silent && !wasSilent) {
-                        queue.exit(s, reg, AreaCause.UNREGISTER)
-                        exits++
-                    }
+                    if (!silent && !wasSilent) queueExit(s, reg, AreaCause.UNREGISTER)
                 }
             }
         }
@@ -405,30 +452,41 @@ internal class MovementCore(
     /**
      * Area evaluation at the player's stored position. [mode]: [MODE_STEP] (a block step: path checks and step
      * events), [MODE_ENTRY] (join, world change, respawn: enters only), [MODE_REFRESH] (riding or game mode changed
-     * on the same block: enters only).
+     * on the same block: enters only). For occupancies, a state change is the cause of an enter or exit only when it
+     * is why the player starts or stops counting; a player merely found inside or outside by it moved there within
+     * their block, and gets the movement cause. So [occEnter] is GAME_MODE (used by occupancies that exclude
+     * spectators; others get [cause]) or, for a riding change, the movement cause from before it (used by occupancies
+     * whose rider policy lets everyone in; for the others the change itself, [cause], is the reason). [occExit] is
+     * the cause of exits found by a riding change (riders never leave because of one).
+     *
+     * Areas are tested at the step position ([x], [y], [z], from the last movement report); occupancies at the exact
+     * position ([PlayerState.lx]), which is the same after a movement report and may be newer in a refresh.
      */
-    private fun evaluate(s: PlayerState, fx: Double, fy: Double, fz: Double, walkPath: Boolean, cause: AreaCause, mode: Int) {
+    private fun evaluate(
+        s: PlayerState, fx: Double, fy: Double, fz: Double, walkPath: Boolean, cause: AreaCause, mode: Int,
+        occEnter: OccupancyCause? = null, occExit: OccupancyCause? = null,
+    ) {
         val st = ++stamp
         val x = s.px
         val y = s.py
         val z = s.pz
         evaluating = true
         try {
-            // 1. Exits: memberships whose area no longer contains the player.
+            // 1. Exits: memberships whose area no longer contains the player (or, for an occupancy, who became a
+            // spectator).
             var i = 0
             while (i < s.memberCount) {
                 val reg = s.members[i]!!
                 reg.visitStamp = st
-                if (reg.active && contains(reg, s, x, y, z)) {
+                val inside = reg.active && contains(reg, s, x, y, z)
+                if (inside && mayStay(reg, s)) {
                     i++
                     continue
                 }
                 val silent = s.memberSilent[i]
                 removeMemberAt(s, i)
-                if (!silent && reg.active) {
-                    queue.exit(s, reg, cause)
-                    exits++
-                }
+                // A member who is a spectator now leaves for that reason, wherever they stand.
+                if (!silent && reg.active) queueExit(s, reg, cause, if (mayStay(reg, s)) occExit else OccupancyCause.GAME_MODE)
             }
             // 2. Enters (and pass-through) for the areas of the current chunk.
             val here = s.chunkAreas
@@ -436,7 +494,7 @@ internal class MovementCore(
                 for (reg in here) {
                     if (reg.visitStamp == st) continue
                     reg.visitStamp = st
-                    consider(s, reg, fx, fy, fz, x, y, z, cause, mode, st)
+                    consider(s, reg, fx, fy, fz, x, y, z, cause, mode, st, occEnter)
                 }
             }
             // 3. Pass-through areas in the other chunks along the path.
@@ -457,7 +515,7 @@ internal class MovementCore(
     private fun consider(
         s: PlayerState, reg: AreaReg,
         fx: Double, fy: Double, fz: Double, x: Double, y: Double, z: Double,
-        cause: AreaCause, mode: Int, st: Long,
+        cause: AreaCause, mode: Int, st: Long, occEnter: OccupancyCause? = null,
     ) {
         if (!reg.active) return
         if (contains(reg, s, x, y, z)) {
@@ -465,16 +523,15 @@ internal class MovementCore(
             val silent = mode == MODE_ENTRY && cause == AreaCause.JOIN && !reg.options.fireOnJoin
             addMember(s, reg, silent, st)
             if (!silent) {
-                queue.enter(s, reg, cause)
-                enters++
+                val applies = occEnter != null &&
+                    (if (occEnter == OccupancyCause.GAME_MODE) reg.dropsSpectators else reg.options.riders == RiderPolicy.ALLOW)
+                queueEnter(s, reg, cause, if (applies) occEnter else null)
             }
         } else if (mode == MODE_STEP && cause != AreaCause.TELEPORT && reg.options.passThrough && mayEnter(reg, s) &&
             crosses(reg, fx, fy, fz, x, y, z)
         ) {
-            queue.enter(s, reg, cause)
-            queue.exit(s, reg, cause)
-            enters++
-            exits++
+            queueEnter(s, reg, cause)
+            queueExit(s, reg, cause)
             passThroughs++
         }
     }
@@ -534,7 +591,14 @@ internal class MovementCore(
     }
 
     private fun contains(reg: AreaReg, s: PlayerState, x: Double, y: Double, z: Double): Boolean =
-        reg.area.boxContains(s.bx, s.by, s.bz) && predicate(reg, x, y, z)
+        reg.area.boxContains(s.bx, s.by, s.bz) && shape(reg, s, x, y, z)
+
+    /**
+     * The shape test for a player in the box: an area at ([x], [y], [z]) (the step position), an occupancy at the
+     * player's exact position. Both are in the same block; they differ only after a refresh or a same-block report.
+     */
+    private fun shape(reg: AreaReg, s: PlayerState, x: Double, y: Double, z: Double): Boolean =
+        if (reg.occupancy != null) predicate(reg, s.lx, s.ly, s.lz) else predicate(reg, x, y, z)
 
     private fun predicate(reg: AreaReg, x: Double, y: Double, z: Double): Boolean {
         if (!reg.area.isCustom) return true
@@ -558,6 +622,27 @@ internal class MovementCore(
             RiderPolicy.ALLOW -> true
             RiderPolicy.ONLY -> s.mounted
         }
+    }
+
+    /**
+     * Whether a member may stay while still inside: always, except an occupancy member who is a spectator now (unless
+     * the occupancy includes spectators). Riders and areas' spectators gate entering only.
+     */
+    private fun mayStay(reg: AreaReg, s: PlayerState): Boolean = !(s.spectator && reg.dropsSpectators)
+
+    /**
+     * Queues an enter and counts it. For an occupancy the handler's cause is [occ] when given, else the one matching
+     * [cause].
+     */
+    private fun queueEnter(s: PlayerState, reg: AreaReg, cause: AreaCause, occ: OccupancyCause? = null) {
+        queue.enter(s, reg, cause, if (reg.occupancy == null) null else occ ?: OCCUPANCY_CAUSES[cause.ordinal])
+        enters++
+    }
+
+    /** Queues an exit and counts it; like [queueEnter]. */
+    private fun queueExit(s: PlayerState, reg: AreaReg, cause: AreaCause, occ: OccupancyCause? = null) {
+        queue.exit(s, reg, cause, if (reg.occupancy == null) null else occ ?: OCCUPANCY_CAUSES[cause.ordinal])
+        exits++
     }
 
     private fun addMember(s: PlayerState, reg: AreaReg, silent: Boolean, st: Long) {
@@ -590,19 +675,124 @@ internal class MovementCore(
         reg.members--
     }
 
-    /** Ends every membership; announced ones get an exit with [cause]. */
-    private fun exitAll(s: PlayerState, cause: AreaCause) {
+    /**
+     * Ends every membership; announced ones get an exit with [cause]. With [death], occupancy memberships that keep
+     * the dead ([AreaReg.keepDead]) stay, in their order.
+     */
+    private fun exitAll(s: PlayerState, cause: AreaCause, death: Boolean = false) {
+        var kept = 0
         for (i in 0 until s.memberCount) {
             val reg = s.members[i]!!
             val silent = s.memberSilent[i]
-            s.members[i] = null
-            reg.members--
-            if (!silent && reg.active) {
-                queue.exit(s, reg, cause)
-                exits++
+            if (death && reg.keepDead && reg.active) {
+                s.members[kept] = reg
+                s.memberSilent[kept] = silent
+                s.memberSince[kept] = s.memberSince[i]
+                kept++
+                continue
             }
+            reg.members--
+            if (!silent && reg.active) queueExit(s, reg, cause)
         }
-        s.memberCount = 0
+        for (i in kept until s.memberCount) s.members[i] = null
+        s.memberCount = kept
+    }
+
+    /**
+     * Tests [s] again against the shaped occupancies of their block at their exact position, after a teleport that
+     * stayed in the block: members now outside exit, players now inside enter, both with [cause] (TELEPORT; VEHICLE
+     * for a rider carried by the teleport, MOVE for a dismount, as a block step would be classified). Areas,
+     * box occupancies (the block didn't change), watches, the step position and the cached chunk listing are untouched.
+     */
+    /**
+     * A game mode change that left the spectator state as it was (survival to creative): shaped occupancies are tested
+     * again where the player is now, like the other explicit evaluations. A member found outside left by moving within
+     * their block, and a player found inside came the same way: cause MOVE, or VEHICLE while riding. Nothing else is
+     * evaluated (areas ignore such a change, as before).
+     */
+    fun retestShapedOccupancies(s: PlayerState) {
+        if (index.shapedOccupancies == 0 || s.removed || s.dead) return
+        check(!evaluating) { "game mode change from inside an area predicate" }
+        evaluateShapedOccupancies(s, if (s.mounted) AreaCause.VEHICLE else AreaCause.MOVE)
+        queue.drain()
+    }
+
+    private fun evaluateShapedOccupancies(s: PlayerState, cause: AreaCause) {
+        val here = index.world(s.worldId ?: return)?.chunks?.get(s.chunkKey)
+        if (here == null && s.memberCount == 0) return
+        val st = ++stamp
+        evaluating = true
+        try {
+            var i = 0
+            while (i < s.memberCount) {
+                val reg = s.members[i]!!
+                reg.visitStamp = st // a member: the chunk pass below skips it without scanning the memberships
+                if (reg.occupancy == null || !reg.area.isCustom || !reg.active ||
+                    (contains(reg, s, s.px, s.py, s.pz) && mayStay(reg, s))
+                ) {
+                    i++
+                    continue
+                }
+                val silent = s.memberSilent[i]
+                removeMemberAt(s, i)
+                if (!silent) queueExit(s, reg, cause, if (mayStay(reg, s)) null else OccupancyCause.GAME_MODE)
+            }
+            if (here != null) {
+                for (reg in here) {
+                    if (reg.visitStamp == st || reg.occupancy == null || !reg.area.isCustom || !reg.active) continue
+                    if (!contains(reg, s, s.px, s.py, s.pz) || !mayEnter(reg, s)) continue
+                    addMember(s, reg, false, st)
+                    queueEnter(s, reg, cause)
+                }
+            }
+        } finally {
+            endEvaluation()
+        }
+    }
+
+    /**
+     * Re-anchors an occupancy's [reg] on [to] (see [com.sneakyutils.triggers.Occupancy.moveTo]): the index changes
+     * only the chunks entered or left, then players are re-evaluated against the new area where they stand. Players
+     * inside both stay without events. Enters for players now inside are queued before exits for members now outside
+     * (both with cause AREA_MOVED), so an occupancy's count never passes through 0 when one player replaces another.
+     * Dead players don't enter; a dead member stays while the new area holds their position. One pass over the online
+     * players (box test, then the predicate for those in the box), a second only when the area had members. Moving
+     * to the area it already has re-evaluates without touching the index.
+     */
+    fun moveArea(reg: AreaReg, to: Area) {
+        check(!evaluating) { "can't move an area from inside an area predicate" }
+        check(reg.active) { "the area is closed" }
+        require(reg.occupancy != null) { "only an occupancy's area can move" }
+        val hadMembers = reg.members > 0
+        if (to !== reg.area) index.move(reg, to) // the same area: nothing to reindex, but still re-evaluated
+        val st = ++stamp
+        evaluating = true
+        try {
+            for (s in players.values) {
+                if (s.dead || s.worldId != to.worldId || !to.boxContains(s.bx, s.by, s.bz)) continue
+                if (s.isMember(reg) || !mayEnter(reg, s) || !shape(reg, s, s.px, s.py, s.pz)) continue
+                addMember(s, reg, false, st)
+                queueEnter(s, reg, AreaCause.REGISTER, OccupancyCause.AREA_MOVED)
+            }
+            if (hadMembers) {
+                for (s in players.values) {
+                    for (i in 0 until s.memberCount) {
+                        if (s.members[i] !== reg) continue
+                        if (s.memberSince[i] != st &&
+                            !(s.worldId == to.worldId && contains(reg, s, s.px, s.py, s.pz) && mayStay(reg, s))
+                        ) {
+                            val silent = s.memberSilent[i]
+                            removeMemberAt(s, i)
+                            if (!silent) queueExit(s, reg, AreaCause.UNREGISTER, OccupancyCause.AREA_MOVED)
+                        }
+                        break
+                    }
+                }
+            }
+        } finally {
+            endEvaluation()
+        }
+        queue.drain()
     }
 
     // ---------------------------------------------------------------- lifecycle
@@ -646,12 +836,15 @@ internal class MovementCore(
         queue.drain()
     }
 
-    /** The player died: exits with [AreaCause.DEATH]; nothing fires for them until [respawn]. */
+    /**
+     * The player died: exits with [AreaCause.DEATH], except occupancies that keep the dead, which keep them until the
+     * respawn is evaluated (or they quit or change world). Nothing else fires for them until [respawn].
+     */
     fun death(uuid: UUID) {
         val s = players[uuid] ?: return
         if (s.dead) return
         s.dead = true
-        exitAll(s, AreaCause.DEATH)
+        exitAll(s, AreaCause.DEATH, death = true)
         queue.drain()
     }
 
@@ -667,7 +860,8 @@ internal class MovementCore(
         val nby = Geometry.blockOf(y)
         val nbz = Geometry.blockOf(z)
         if (worldId == s.worldId) {
-            // Called even for the block they died on (no dedupe): death emptied the memberships, so this enters.
+            // Called even for the block they died on (no dedupe): death emptied the memberships, so this enters. Kept
+            // occupancy memberships stay when the respawn point is inside them and exit with TELEPORT otherwise.
             moveWithinWorld(s, nbx, nby, nbz, x, y, z, true)
         } else {
             changeWorld(s, worldId, nbx, nby, nbz, x, y, z)
@@ -683,7 +877,12 @@ internal class MovementCore(
         if (isMounted) addMounted(s) else removeMounted(s)
         refreshIfStale(s)
         if (!s.dead && s.worldId != null && s.chunkAreas != null) {
-            evaluate(s, s.px, s.py, s.pz, false, if (isMounted) AreaCause.VEHICLE else AreaCause.MOVE, MODE_REFRESH)
+            // An occupancy member found outside here left before the change, within their block: on foot when they
+            // now mount, riding when they now dismount. The same for a player found inside an occupancy that takes
+            // riders and walkers alike; where the rider policy decides, the change itself is the cause.
+            val before = if (isMounted) OccupancyCause.MOVE else OccupancyCause.VEHICLE
+            evaluate(s, s.px, s.py, s.pz, false, if (isMounted) AreaCause.VEHICLE else AreaCause.MOVE, MODE_REFRESH,
+                occEnter = before, occExit = before)
             queue.drain()
         }
     }
@@ -694,8 +893,26 @@ internal class MovementCore(
         check(!evaluating) { "game mode change from inside an area predicate" }
         s.spectator = spectator
         refreshIfStale(s)
-        if (!s.dead && s.worldId != null && s.chunkAreas != null) {
-            evaluate(s, s.px, s.py, s.pz, false, if (s.mounted) AreaCause.VEHICLE else AreaCause.MOVE, MODE_REFRESH)
+        if (!s.dead && s.worldId != null && (s.chunkAreas != null || s.memberCount > 0)) {
+            // Occupancies that exclude spectators take them out and back in, with cause GAME_MODE; others get the
+            // movement cause for what the refresh finds. Areas only gate entering.
+            evaluate(s, s.px, s.py, s.pz, false, if (s.mounted) AreaCause.VEHICLE else AreaCause.MOVE, MODE_REFRESH,
+                OccupancyCause.GAME_MODE)
+            queue.drain()
+        } else if (s.dead && spectator && s.memberCount > 0) {
+            // Dead members kept by occupancies: nothing is evaluated until the respawn, but an occupancy that excludes
+            // spectators must let a dead player who turned spectator go now. (Dead players enter nothing either way.)
+            var i = 0
+            while (i < s.memberCount) {
+                val reg = s.members[i]!!
+                if (!reg.dropsSpectators) {
+                    i++
+                    continue
+                }
+                val silent = s.memberSilent[i]
+                removeMemberAt(s, i)
+                if (!silent && reg.active) queueExit(s, reg, AreaCause.MOVE, OccupancyCause.GAME_MODE)
+            }
             queue.drain()
         }
     }
@@ -778,6 +995,10 @@ internal class MovementCore(
         /** Chunk keys for one path walk: a 64-block move needs at most 16 (see GeometryTest). */
         private const val CHUNK_BUFFER = 32
         private const val UNDER_EPSILON = 1.0e-3
+
+        /** The occupancy cause for each [AreaCause], by ordinal (same names). */
+        private val OCCUPANCY_CAUSES: Array<OccupancyCause> =
+            Array(AreaCause.entries.size) { OccupancyCause.valueOf(AreaCause.entries[it].name) }
 
         /** Registration order (see [AreaReg.seq]). */
         private val BY_REGISTRATION = Comparator<AreaReg?> { a, b -> a!!.seq.compareTo(b!!.seq) }

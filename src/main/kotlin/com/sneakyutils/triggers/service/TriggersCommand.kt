@@ -51,7 +51,8 @@ internal class TriggersCommand(private val running: () -> TriggerService?) {
         val total = s.byKind.values.sum()
         out += "Triggers: $total subscriptions${if (total == 0) "" else " (" + join(s.byKind) + ")"}; " +
             "timing ${if (s.timing) "on" else "off"}${if (service.profileOn) " (profile)" else ""}"
-        out += "Areas: ${s.count("area")} in ${s.areaChunks} chunk entries; players tracked ${s.trackedPlayers}, " +
+        out += "Areas: ${s.count("area")}, occupancies ${s.count("occupancy")}, in ${s.areaChunks} chunk entries; " +
+            "players tracked ${s.trackedPlayers}, " +
             "riding ${s.mountedPlayers}"
         if (s.allOnlineTimers > 0) {
             out += "All-online player timers: ${s.allOnlineTimers} (flagged: prefer timers for the players that need them)"

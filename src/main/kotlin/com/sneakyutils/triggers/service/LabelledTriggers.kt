@@ -16,6 +16,9 @@ import com.sneakyutils.triggers.BreakOptions
 import com.sneakyutils.triggers.ClickOptions
 import com.sneakyutils.triggers.EntityClickHandler
 import com.sneakyutils.triggers.EntityMatch
+import com.sneakyutils.triggers.Occupancy
+import com.sneakyutils.triggers.OccupancyHandler
+import com.sneakyutils.triggers.OccupancyOptions
 import com.sneakyutils.triggers.PlayerScope
 import com.sneakyutils.triggers.PlayerTick
 import com.sneakyutils.triggers.PlayerTimer
@@ -45,6 +48,7 @@ internal class LabelledTriggers(private val service: TriggerService, private val
     private val clickDefault = ClickOptions.DEFAULT.toBuilder().label(label).build()
     private val breakDefault = BreakOptions.DEFAULT.toBuilder().label(label).build()
     private val removedDefault = BlockRemovedOptions.DEFAULT.toBuilder().label(label).build()
+    private val occupancyDefault = OccupancyOptions.DEFAULT.toBuilder().label(label).build()
 
     private fun l(o: AreaOptions) = if (o.label != null) o else if (o === AreaOptions.DEFAULT) areaDefault else o.toBuilder().label(label).build()
     private fun l(o: WatchOptions) = if (o.label != null) o else if (o === WatchOptions.DEFAULT) watchDefault else o.toBuilder().label(label).build()
@@ -52,10 +56,15 @@ internal class LabelledTriggers(private val service: TriggerService, private val
     private fun l(o: ClickOptions) = if (o.label != null) o else if (o === ClickOptions.DEFAULT) clickDefault else o.toBuilder().label(label).build()
     private fun l(o: BreakOptions) = if (o.label != null) o else if (o === BreakOptions.DEFAULT) breakDefault else o.toBuilder().label(label).build()
     private fun l(o: BlockRemovedOptions) = if (o.label != null) o else removedDefault
+    private fun l(o: OccupancyOptions) =
+        if (o.label != null) o else if (o === OccupancyOptions.DEFAULT) occupancyDefault else o.toBuilder().label(label).build()
     private fun l(o: PlayerTimerOptions) = if (o.label != null) o else o.toBuilder().label(label).build()
 
     override fun area(owner: Plugin, area: Area, handler: AreaHandler, options: AreaOptions): Subscription =
         service.area(owner, area, handler, l(options))
+
+    override fun occupancy(owner: Plugin, area: Area, handler: OccupancyHandler, options: OccupancyOptions): Occupancy =
+        service.occupancy(owner, area, handler, l(options))
 
     override fun watchSteps(owner: Plugin, player: Player, handler: StepHandler, options: WatchOptions): Subscription =
         service.watchSteps(owner, player, handler, l(options))

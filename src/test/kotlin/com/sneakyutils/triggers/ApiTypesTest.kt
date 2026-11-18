@@ -90,6 +90,157 @@ class ApiTypesTest {
     }
 
     @Test
+    fun sphereContainsItsSurfaceAndItsBoxCoversIt() {
+        val ball = Area.sphere(world, 0.0, 64.0, 0.0, 2.0)
+        assertTrue(ball.isCustom)
+        assertEquals(listOf(-2, 62, -2, 2, 66, 2), listOf(ball.minX, ball.minY, ball.minZ, ball.maxX, ball.maxY, ball.maxZ),
+            "an integer surface (x = 2.0) is in block 2, so the box reaches it")
+        for ((x, y, z) in listOf(Triple(2.0, 64.0, 0.0), Triple(-2.0, 64.0, 0.0), Triple(0.0, 66.0, 0.0),
+            Triple(0.0, 62.0, 0.0), Triple(0.0, 64.0, 2.0), Triple(0.0, 64.0, -2.0))) {
+            assertTrue(ball.contains(x, y, z), "surface point $x $y $z")
+        }
+        assertFalse(ball.contains(2.0001, 64.0, 0.0))
+        assertFalse(ball.contains(1.5, 65.5, 0.0), "in the box, outside the ball")
+        assertTrue(ball.contains(1.0, 65.0, 1.0))
+
+        val off = Area.sphere(world, 0.5, 64.5, 0.5, 3.0)
+        assertEquals(listOf(-3, 61, -3, 3, 67, 3), listOf(off.minX, off.minY, off.minZ, off.maxX, off.maxY, off.maxZ))
+        assertTrue(off.contains(3.5, 64.5, 0.5))
+        assertFalse(off.contains(3.5, 64.5, 1.0))
+    }
+
+    @Test
+    fun cylinderStandsOnItsCentreAndIncludesBaseTopAndSide() {
+        val can = Area.cylinder(world, 10.5, 64.0, 10.5, 3.0, 2.5)
+        assertEquals(listOf(7, 64, 7, 13, 66, 13), listOf(can.minX, can.minY, can.minZ, can.maxX, can.maxY, can.maxZ))
+        assertTrue(can.contains(10.5, 64.0, 10.5), "base")
+        assertTrue(can.contains(10.5, 66.5, 10.5), "top")
+        assertFalse(can.contains(10.5, 63.999, 10.5), "under the base")
+        assertFalse(can.contains(10.5, 66.501, 10.5), "over the top")
+        assertTrue(can.contains(13.5, 65.0, 10.5), "side")
+        assertFalse(can.contains(13.5, 65.0, 11.0), "just outside the side")
+        assertTrue(Area.cylinder(world, 0.0, 64.0, 0.0, 1.0, 0.0).contains(0.5, 64.0, 0.5), "a flat disc: height 0")
+    }
+
+    @Test
+    fun translateMovesTheBoxAndTheShapeWithoutNesting() {
+        val ball = Area.sphere(world, 0.5, 64.0, 0.5, 2.0)
+        var moved = ball
+        repeat(1000) { moved = moved.translate(1, 0, -1) }
+        assertEquals(listOf(ball.minX + 1000, ball.minZ - 1000), listOf(moved.minX, moved.minZ))
+        assertTrue(moved.contains(1002.5, 64.0, -999.5), "the surface moved with it")
+        assertFalse(moved.contains(2.5, 64.0, 0.5))
+        assertEquals(world, moved.worldId)
+        assertTrue(ball.contains(2.5, 64.0, 0.5), "the original is unchanged")
+
+        val half = Area.custom(world, 0, 0, 0, 9, 9, 9) { x, _, _ -> x < 5.0 }
+        val shifted = half.translate(10, 0, 0)
+        assertTrue(shifted.contains(14.9, 1.0, 1.0))
+        assertFalse(shifted.contains(15.1, 1.0, 1.0))
+        val boxed = Area.box(world, 0, 0, 0, 1, 1, 1).translate(0, 5, 0)
+        assertFalse(boxed.isCustom)
+        assertEquals(listOf(5, 6), listOf(boxed.minY, boxed.maxY))
+    }
+
+    @Test
+    fun translateRefusesToLeaveTheIntRangeAndKeepsFarShapesExact() {
+        // Review finding 5: an overflowing translate wrapped to inverted bounds.
+        val small = Area.box(world, 0, 0, 0, 1, 1, 1)
+        assertThrows(IllegalArgumentException::class.java) { small.translate(Int.MAX_VALUE, 0, 0) }
+        assertThrows(IllegalArgumentException::class.java) { Area.box(world, 0, -5, 0, 1, -1, 1).translate(0, Int.MIN_VALUE, 0) }
+        val far = small.translate(2_000_000_000, 0, 0)
+        assertThrows(IllegalArgumentException::class.java) { far.translate(2_000_000_000, 0, 0) }
+        val ball = Area.sphere(world, 0.5, 0.5, 0.5, 1.0)
+        val away = ball.translate(2_000_000_000, 0, 0).translate(-2_000_000_000, 0, 0).translate(-2_000_000_000, 0, 0)
+        assertTrue(away.contains(-1_999_999_999.5, 0.5, 0.5), "a shape moved far and back stays exact")
+        assertThrows(IllegalArgumentException::class.java) { Area.sphere(world, 3.0e9, 0.0, 0.0, 1.0) }
+        assertThrows(IllegalArgumentException::class.java) { Area.cylinder(world, 0.0, 2.1e9, 0.0, 1.0, 1.0e8) }
+    }
+
+    @Test
+    fun shapeRangeChecksLookAtEachBoundOnly() {
+        // Fourth review, finding 3: a tall cylinder far below zero whose every bound fits was refused.
+        val tall = Area.cylinder(world, 0.0, -1_500_000_000.0, 0.0, 1.0, 1_500_000_000.0)
+        assertEquals(listOf(-1, -1_500_000_000, -1, 1, 0, 1), listOf(tall.minX, tall.minY, tall.minZ, tall.maxX, tall.maxY, tall.maxZ))
+        assertThrows(IllegalArgumentException::class.java) { Area.cylinder(world, 0.0, 1_500_000_000.0, 0.0, 1.0, 1_500_000_000.0) }
+        Area.sphere(world, 0.0, 2_000_000_000.0, 0.0, 1.0)
+        // Fifth review, finding 4: bounds whose block is still an int are fine, up to the limits themselves.
+        val top = Area.cylinder(world, 0.0, 2_147_483_647.0, 0.0, 1.0, 0.0)
+        assertEquals(listOf(Int.MAX_VALUE, Int.MAX_VALUE), listOf(top.minY, top.maxY))
+        assertEquals(Int.MAX_VALUE, Area.cylinder(world, 2_147_483_646.5, 0.0, 0.0, 1.0, 1.0).maxX)
+        assertEquals(Int.MIN_VALUE, Area.sphere(world, 0.0, -2_147_483_647.0, 0.0, 1.0).minY)
+        assertThrows(IllegalArgumentException::class.java) { Area.cylinder(world, 2_147_483_647.0, 0.0, 0.0, 1.0, 1.0) }
+        assertThrows(IllegalArgumentException::class.java) { Area.cylinder(world, 0.0, 2_147_483_647.0, 0.0, 1.0, 1.0) }
+        assertThrows(IllegalArgumentException::class.java) { Area.sphere(world, 0.0, -2_147_483_647.5, 0.0, 1.0) }
+    }
+
+    @Test
+    fun aTranslatedSphereOrCylinderIsTheSameShapeAtItsMovedCentre() {
+        // Ninth review, finding 1: testing by subtracting the offset rejected points on the moved shape itself.
+        val disc = Area.cylinder(world, 0.0, 0.1, 0.0, 1.0, 0.0).translate(0, 1, 0)
+        assertTrue(disc.contains(0.0, 0.1 + 1.0, 0.0), "its own centre, at the moved base")
+        assertTrue(disc.contains(0.0, 1.1, 0.0))
+        assertEquals(listOf(1, 1), listOf(disc.minY, disc.maxY))
+
+        val ball = Area.sphere(world, 0.1, 0.7, 0.3, 0.2).translate(3, -5, 7)
+        assertTrue(ball.contains(0.1 + 3, 0.7 - 5, 0.3 + 7), "its centre")
+        val fresh = Area.sphere(world, 0.1 + 3, 0.7 - 5, 0.3 + 7, 0.2)
+        for (dx in listOf(-0.2, -0.19999, 0.0, 0.1, 0.2, 0.20001)) {
+            for (dy in listOf(-0.2, 0.0, 0.2)) {
+                val x = 0.1 + 3 + dx
+                val y = 0.7 - 5 + dy
+                assertEquals(fresh.contains(x, y, 0.3 + 7), ball.contains(x, y, 0.3 + 7), "as a sphere made there: $dx $dy")
+            }
+        }
+        assertEquals(listOf(fresh.minX, fresh.minY, fresh.minZ, fresh.maxX, fresh.maxY, fresh.maxZ),
+            listOf(ball.minX, ball.minY, ball.minZ, ball.maxX, ball.maxY, ball.maxZ))
+
+        // Round trips: back at the start it is the original shape exactly, however many moves it took.
+        val can = Area.cylinder(world, 0.1, 0.1, 0.1, 0.3, 0.7)
+        var moved = can
+        repeat(500) { moved = moved.translate(7, -3, 11) }
+        repeat(500) { moved = moved.translate(-7, 3, -11) }
+        assertEquals(listOf(can.minX, can.minY, can.minZ, can.maxX, can.maxY, can.maxZ),
+            listOf(moved.minX, moved.minY, moved.minZ, moved.maxX, moved.maxY, moved.maxZ))
+        for ((x, y, z) in listOf(Triple(0.1, 0.1, 0.1), Triple(0.1, 0.1 + 0.7, 0.1), Triple(0.1 + 0.25, 0.5, 0.1))) {
+            assertEquals(can.contains(x, y, z), moved.contains(x, y, z), "$x $y $z")
+            assertTrue(moved.contains(x, y, z), "$x $y $z is on the cylinder")
+        }
+        assertEquals(can.contains(0.1 + 0.3, 0.5, 0.1), moved.contains(0.1 + 0.3, 0.5, 0.1), "the side, whichever way it rounds")
+        assertFalse(moved.contains(0.1, 0.1 + 0.7 + 1e-9, 0.1))
+        assertThrows(IllegalArgumentException::class.java) { can.translate(Int.MAX_VALUE, 0, 0).translate(Int.MAX_VALUE, 0, 0) }
+        assertTrue(Area.custom(world, 0, 0, 0, 9, 9, 9) { x, _, _ -> x < 5.0 }.translate(10, 0, 0).contains(14.9, 1.0, 1.0),
+            "a custom predicate still gets the position moved back")
+    }
+
+    @Test
+    fun shapesRejectBadArgumentsAndTheSpanLimit() {
+        assertThrows(IllegalArgumentException::class.java) { Area.sphere(world, 0.0, 0.0, 0.0, 0.0) }
+        assertThrows(IllegalArgumentException::class.java) { Area.sphere(world, 0.0, 0.0, 0.0, Double.NaN) }
+        assertThrows(IllegalArgumentException::class.java) { Area.sphere(world, Double.POSITIVE_INFINITY, 0.0, 0.0, 1.0) }
+        assertThrows(IllegalArgumentException::class.java) { Area.cylinder(world, 0.0, 0.0, 0.0, 1.0, -1.0) }
+        assertThrows(IllegalArgumentException::class.java) { Area.sphere(world, 0.0, 64.0, 0.0, 600.0) }
+        Area.sphere(world, 8.0, 64.0, 8.0, 500.0)
+    }
+
+    @Test
+    fun occupancyOptionDefaultsMatchConradsDecisions() {
+        val o = OccupancyOptions.DEFAULT
+        assertEquals(RiderPolicy.ALLOW, o.riders, "riders count")
+        assertFalse(o.includeSpectators, "spectators don't")
+        assertTrue(o.countDead, "the dead stay until they respawn elsewhere")
+        assertEquals(null, o.label)
+        val b = OccupancyOptions.builder().countDead(false)
+        val first = b.build()
+        b.countDead(true)
+        assertFalse(first.countDead)
+        val copy = first.toBuilder().includeSpectators(true).label("x:y").build()
+        assertTrue(copy.includeSpectators)
+        assertFalse(copy.countDead)
+        assertThrows(IllegalArgumentException::class.java) { OccupancyOptions.builder().label("Bad Label") }
+    }
+
+    @Test
     fun optionDefaultsMatchTheSpec() {
         val a = AreaOptions.DEFAULT
         assertEquals(RiderPolicy.SKIP, a.riders)
@@ -190,6 +341,8 @@ class ApiTypesTest {
         }
         assertEquals(listOf("break", "break type", "timer ADDED"), fake.calls, "options it can't honour are refused, not ignored")
         assertThrows(UnsupportedOperationException::class.java) { fake.onBlockRemoved(owner, key, { _, _, _ -> }) }
+        val area = Area.box(world, 0, 0, 0, 1, 1, 1)
+        assertThrows(UnsupportedOperationException::class.java) { fake.occupancy(owner, area, object : OccupancyHandler {}) }
         assertTrue(fake.stats().warnings.isEmpty())
     }
 }

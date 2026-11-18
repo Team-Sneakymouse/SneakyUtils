@@ -19,6 +19,10 @@ import com.sneakyutils.triggers.BlockUnderHandler
 import com.sneakyutils.triggers.ClickOptions
 import com.sneakyutils.triggers.EntityClickHandler
 import com.sneakyutils.triggers.EntityMatch
+import com.sneakyutils.triggers.Occupancy
+import com.sneakyutils.triggers.OccupancyCause
+import com.sneakyutils.triggers.OccupancyHandler
+import com.sneakyutils.triggers.OccupancyOptions
 import com.sneakyutils.triggers.PlayerScope
 import com.sneakyutils.triggers.PlayerTick
 import com.sneakyutils.triggers.PlayerTimer
@@ -82,6 +86,70 @@ internal class TriggerService(
     private var removalListener: BlockRemovedListener? = null
     private var oldPrimeListener: Listener? = null
     private val pollLocation = Location(null, 0.0, 0.0, 0.0)
+
+    /**
+     * Every occupancy handle made and still referenced by someone (weakly held; identity, as subscriptions don't
+     * override equals). [shutdown] empties them all, closed or not: a closed one may still hold members whose exits
+     * were queued, and the queue is discarded.
+     */
+    private val occupancyHandles: MutableSet<OccupancySub> = java.util.Collections.newSetFromMap(java.util.WeakHashMap())
+    private val refineLocation = Location(null, 0.0, 0.0, 0.0)
+
+    /**
+     * Players whose move, teleport or respawn event is being handled now (innermost last). Bukkit applies the
+     * destination after the event, so their Bukkit location is still the old one while the engine already has the
+     * new one: [refinePositions] must not take it.
+     */
+    private val eventPlayers = ArrayList<UUID>(4)
+
+    private inline fun <T> asEventPlayer(id: UUID, block: () -> T): T {
+        eventPlayers.add(id)
+        try {
+            return block()
+        } finally {
+            eventPlayers.removeAt(eventPlayers.size - 1)
+        }
+    }
+
+    /**
+     * Before an evaluation that no movement report started (an occupancy registered or moved onto a shape, a game mode
+     * or riding change): the engine stores exact positions only on reported block steps, so players who moved within
+     * their block since are given their current position, for the players whose stored block is in [to]'s box (the
+     * only ones the shape test can concern: members outside the box leave on the block test alone).
+     * It is the position occupancies are tested at only: areas, watches and pass-through paths keep using the last
+     * reported step, exactly as without occupancies. Same-block refinements only.
+     */
+    fun refinePositions(to: Area) {
+        for (s in core.liveStates) {
+            if (s.worldId != to.worldId || !to.boxContains(s.bx, s.by, s.bz)) continue
+            refinePlayer(s)
+        }
+    }
+
+    /**
+     * Gives [s] its current exact position when it is still in the stored block (see [refinePositions]). A player
+     * whose own move, teleport or respawn event is being handled keeps the latest position the engine was given:
+     * Bukkit still reports the old one until the event ends.
+     */
+    /**
+     * [refinePlayer] before a state change is evaluated (game mode, riding), only while a shaped occupancy exists:
+     * nothing else reads the exact position, so without one the change costs what it did before occupancies.
+     */
+    fun refineForShapes(s: PlayerState) {
+        if (index.shapedOccupancies > 0) refinePlayer(s)
+    }
+
+    fun refinePlayer(s: PlayerState) {
+        // Bukkit's location is still the old one: the engine's latest report stands (a same-block teleport made by a
+        // handler of this event included; the engine keeps it as the exact position).
+        if (s.uuid in eventPlayers) return
+        val p = s.player ?: return
+        val loc = refineLocation
+        p.getLocation(loc)
+        val world = loc.world
+        if (world != null) core.refinePosition(s, world.uid, loc.x, loc.y, loc.z)
+        loc.world = null
+    }
 
     @JvmField var running = false
 
@@ -289,7 +357,11 @@ internal class TriggerService(
         oldPrimeListener = null
         pendingResync.clear()
         pendingRiding.clear()
+        pendingGameMode.clear()
         tables.clear()
+        // Nothing more is delivered: no handle keeps players, including closed ones whose exits were still queued.
+        for (sub in occupancyHandles) sub.clearMembers()
+        occupancyHandles.clear()
         val all = byOwner.values.flatten()
         byOwner.clear()
         for (sub in all) sub.dispose()
@@ -346,7 +418,7 @@ internal class TriggerService(
 
     /** A PlayerMoveEvent that changed the block position: the hot path, timed as stage `move` during a capture. */
     fun moved(id: UUID, worldId: UUID, x: Double, y: Double, z: Double) = stage(STAGE_MOVE, "move") {
-        core.position(id, worldId, x, y, z, false)
+        asEventPlayer(id) { core.position(id, worldId, x, y, z, false) }
     }
 
     // ---- teleport reconciliation
@@ -356,7 +428,15 @@ internal class TriggerService(
 
     /** The player whose teleport or respawn event is being handled right now (null outside one). */
     private var overridingEventPlayer: UUID? = null
-    private val pendingResync = LinkedHashSet<UUID>()
+    /**
+     * Players to resync, each with how the teleport that will be applied last (the outermost one being handled when
+     * the nested teleport came) was classified ([teleportKind]): the cause of a shaped-occupancy re-test the
+     * correction makes. A later request for the same player replaces it.
+     */
+    private val pendingResync = LinkedHashMap<UUID, AreaCause>()
+
+    /** The classification of the outermost teleport or respawn being handled for [overridingEventPlayer]. */
+    private var overridingEventKind: AreaCause? = null
     private var resyncScheduled = false
 
     /** Players waiting for a resync, for leak tests. */
@@ -373,21 +453,34 @@ internal class TriggerService(
     fun teleported(p: Player, worldId: UUID, x: Double, y: Double, z: Double, dismount: Boolean = false) =
         stage(STAGE_TELEPORT, "teleport") { teleportedInternal(p, worldId, x, y, z, dismount) }
 
+    /**
+     * What a teleport to [worldId] is for [s]: VEHICLE for a rider carried within their world, MOVE for a [dismount]
+     * within it, TELEPORT otherwise. The one rule for teleport events and for the resync after a nested one (whose
+     * shaped-occupancy re-test gets this cause too).
+     */
+    private fun teleportKind(s: PlayerState, worldId: UUID, dismount: Boolean): AreaCause {
+        val sameWorld = worldId == s.worldId
+        return if (s.mounted && sameWorld) AreaCause.VEHICLE else if (dismount && sameWorld) AreaCause.MOVE else AreaCause.TELEPORT
+    }
+
     private fun teleportedInternal(p: Player, worldId: UUID, x: Double, y: Double, z: Double, dismount: Boolean) {
         val id = p.uniqueId
-        if (overridingEventPlayer == id) requestResync(id)
-        if (core.state(id) == null) return
         val outer = overridingEventPlayer
+        val outerKind = overridingEventKind
+        if (outer == id) requestResync(id, outerKind ?: AreaCause.TELEPORT)
+        if (core.state(id) == null) return
         overridingEventPlayer = id
         try {
             // Re-read the riding state first (a field read): a mount made without an event is picked up here.
             val s = syncRiding(p) ?: return
-            val sameWorld = worldId == s.worldId
-            val riding = s.mounted && sameWorld
-            if (riding) riderTeleports++
-            core.position(s, worldId, x, y, z, !riding && !(dismount && sameWorld))
+            val kind = teleportKind(s, worldId, dismount)
+            // Nested in the same player's event: the outermost one is applied last, so its classification stays.
+            overridingEventKind = if (outer == id) outerKind else kind
+            if (kind == AreaCause.VEHICLE) riderTeleports++
+            asEventPlayer(id) { core.position(s, worldId, x, y, z, kind == AreaCause.TELEPORT, shapeRetest = kind) }
         } finally {
             overridingEventPlayer = outer
+            overridingEventKind = outerKind
         }
     }
 
@@ -405,11 +498,14 @@ internal class TriggerService(
     private fun respawnedInternal(p: Player, worldId: UUID, x: Double, y: Double, z: Double) {
         val id = p.uniqueId
         val outer = overridingEventPlayer
+        val outerKind = overridingEventKind
         overridingEventPlayer = id
+        if (outer != id) overridingEventKind = AreaCause.TELEPORT
         try {
-            core.respawn(id, worldId, x, y, z)
+            asEventPlayer(id) { core.respawn(id, worldId, x, y, z) }
         } finally {
             overridingEventPlayer = outer
+            overridingEventKind = outerKind
         }
         for (t in playerTimers) if (t.skipDead) t.resume(id)
     }
@@ -421,8 +517,8 @@ internal class TriggerService(
         for (t in playerTimers) if (t.skipDead) t.pause(id)
     }
 
-    private fun requestResync(id: UUID) {
-        pendingResync.add(id)
+    private fun requestResync(id: UUID, kind: AreaCause) {
+        pendingResync[id] = kind
         if (resyncScheduled || !running) return
         resyncScheduled = true
         plugin.server.scheduler.runTask(plugin, Runnable { resync() })
@@ -437,14 +533,18 @@ internal class TriggerService(
     }
 
     private fun resyncAll() {
-        val ids = pendingResync.toList()
+        val pending = ArrayList(pendingResync.entries.map { it.key to it.value })
         pendingResync.clear()
-        for (id in ids) {
+        for ((id, kind) in pending) {
             val p = plugin.server.getPlayer(id) ?: continue
             val loc = p.location
             val world = loc.world ?: continue
             resyncs++
-            core.position(id, world.uid, loc.x, loc.y, loc.z, true)
+            // Areas and watches take the correction as a teleport, as before. A shaped occupancy re-tested by a
+            // correction inside the block gets the cause of the teleport that was applied (VEHICLE for a rider, MOVE
+            // for a dismount), as noted when the correction was asked for.
+            val s = core.state(id) ?: continue
+            core.position(s, world.uid, loc.x, loc.y, loc.z, true, shapeRetest = kind)
         }
     }
 
@@ -459,6 +559,45 @@ internal class TriggerService(
 
     /** Players waiting for their riding state to be re-read, for leak tests. */
     internal val pendingRidingCount: Int get() = pendingRiding.size
+
+    // ---- game mode
+    // PlayerGameModeChangeEvent fires before the mode changes. The listener applies the proposed mode at once (as it
+    // always did), but that can end up wrong: a handler it calls may change the mode again (Bukkit then applies the
+    // outer change last), or a later listener may cancel the event. So every such event also notes the player, and on
+    // the next tick the engine's spectator flag is compared with the player's real mode; a difference runs the usual
+    // spectator evaluation. Like the teleport resync, one task for all players, only after such an event.
+
+    private val pendingGameMode = LinkedHashSet<UUID>()
+    private var gameModeCheckScheduled = false
+
+    /** Players waiting for their game mode to be re-read, for leak tests. */
+    internal val pendingGameModeCount: Int get() = pendingGameMode.size
+
+    /** A game mode change event for [p]: compare the engine's spectator flag with their real mode next tick. */
+    fun gameModeEvent(p: Player) {
+        pendingGameMode.add(p.uniqueId)
+        if (gameModeCheckScheduled || !running) return
+        gameModeCheckScheduled = true
+        plugin.server.scheduler.runTask(plugin, Runnable { reconcileGameModes() })
+    }
+
+    internal fun reconcileGameModes() {
+        gameModeCheckScheduled = false
+        if (!running) return
+        refreshTiming()
+        stage(STAGE_PLAYER, "player-state") {
+            val ids = pendingGameMode.toList()
+            pendingGameMode.clear()
+            for (id in ids) {
+                val p = plugin.server.getPlayer(id) ?: continue
+                val s = core.state(id) ?: continue
+                val spectator = p.gameMode == GameMode.SPECTATOR
+                if (s.spectator == spectator) continue
+                refineForShapes(s)
+                core.setSpectator(s, spectator)
+            }
+        }
+    }
 
     /** A mount or dismount event for [p] (not cancelled): re-read their riding state next tick. */
     fun ridingEvent(p: Player) {
@@ -498,6 +637,7 @@ internal class TriggerService(
         val s = core.state(p.uniqueId) ?: return null
         val riding = p.isInsideVehicle
         if (s.mounted != riding) {
+            refineForShapes(s) // the riding change evaluates occupancies where the player is now
             core.setMounted(s, riding)
             if (riding) ensureTicker()
         }
@@ -568,6 +708,7 @@ internal class TriggerService(
             if (s == null || s.removed || !s.mounted) continue
             val p = s.player ?: continue
             if (!p.isInsideVehicle) {
+                refineForShapes(s)
                 core.setMounted(s, false)
                 continue
             }
@@ -721,6 +862,16 @@ internal class TriggerService(
         guard(sub, SubBase.CB_EXIT) { sub.handler.onExit(p, reg.area, cause) }
     }
 
+    override fun occupancy(state: PlayerState, reg: AreaReg, entered: Boolean, cause: OccupancyCause) {
+        val sub = reg.link as? OccupancySub ?: return
+        val p = state.player ?: return
+        sub.delivered(p, entered, cause) // keeps the members even for a disabled owner; calls only an enabled one
+    }
+
+    override fun occupanciesDropped(regs: List<AreaReg>) {
+        for (reg in regs) (reg.link as? OccupancySub)?.reconcile()
+    }
+
     override fun areaStep(state: PlayerState, reg: AreaReg, cause: AreaCause) {
         val sub = reg.link as? AreaSub ?: return
         val p = state.player ?: return
@@ -810,7 +961,34 @@ internal class TriggerService(
         // Refused inside an area predicate: checked before anything is registered, so a refusal leaves nothing.
         core.checkMutable("register an area")
         val reg = AreaReg(area, options)
-        val sub = register(AreaSub(this, owner, reg, handler))
+        return addArea(owner, reg, AreaSub(this, owner, reg, handler))
+    }
+
+    /**
+     * An occupancy is an area registration that announces every stay (join and register included, so its members are
+     * always paired) with the occupancy's rider and spectator rules; see [OccupancySub] and [MovementCore.moveArea].
+     */
+    override fun occupancy(owner: Plugin, area: Area, handler: OccupancyHandler, options: OccupancyOptions): Occupancy {
+        checkCall(owner)
+        core.checkMutable("register an occupancy")
+        // A shape is tested at exact positions, which the engine stores only on reported block steps.
+        if (area.isCustom) refinePositions(area)
+        val areaOptions = AreaOptions.builder()
+            .riders(options.riders)
+            .includeSpectators(options.includeSpectators)
+            .fireOnJoin(true)
+            .fireOnRegister(true)
+            .label(options.label)
+            .build()
+        val reg = AreaReg(area, areaOptions, options)
+        val sub = OccupancySub(this, owner, reg, handler)
+        occupancyHandles.add(sub)
+        return addArea(owner, reg, sub)
+    }
+
+    /** Registers [created] and indexes its [reg] (players already inside are counted now). */
+    private fun <S : SubBase> addArea(owner: Plugin, reg: AreaReg, created: S): S {
+        val sub = register(created)
         try {
             refreshTiming()
             stage(STAGE_INDEX, "area-index.add") { core.addArea(reg) }
@@ -1132,7 +1310,7 @@ internal class TriggerService(
 
         /** Every subscription kind, for the `subscriptions.by-kind.<kind>` levels (reported as 0 when none). */
         val KINDS = listOf(
-            AreaSub.KIND, WatchSub.STEP, WatchSub.UNDER, WatchSub.BLOCK, TimerSub.KIND, PlayerTimerSub.KIND,
+            AreaSub.KIND, OccupancySub.KIND, WatchSub.STEP, WatchSub.UNDER, WatchSub.BLOCK, TimerSub.KIND, PlayerTimerSub.KIND,
             PlayerTimerSub.KIND_ALL, BlockSub.CLICK, BlockSub.CLICK_TYPE, BlockSub.BREAK, BlockSub.BREAK_TYPE, EntitySub.KIND,
             RemovedSub.KIND,
         )

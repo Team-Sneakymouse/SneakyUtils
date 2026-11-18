@@ -31,6 +31,15 @@ internal class PlayerState(@JvmField val uuid: UUID) {
     @JvmField var pz: Double = 0.0
     @JvmField var chunkKey: Long = 0
 
+    /**
+     * The exact position occupancies are tested at: the latest one reported or refreshed, also when it stayed in the
+     * stored block (then [px], [py], [pz] keep the last step's, which areas are tested at and pass-through paths start
+     * from). Always in the stored block.
+     */
+    @JvmField var lx: Double = 0.0
+    @JvmField var ly: Double = 0.0
+    @JvmField var lz: Double = 0.0
+
     /** The world's area index (null when the world has no areas) and the cached chunk's areas. */
     @JvmField var worldAreas: WorldAreas? = null
     @JvmField var chunkAreas: Array<AreaReg>? = null

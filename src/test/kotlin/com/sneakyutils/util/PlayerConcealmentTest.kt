@@ -5,6 +5,8 @@ import org.bukkit.Material
 import org.bukkit.entity.ItemDisplay
 import org.bukkit.entity.Player
 import org.bukkit.event.inventory.InventoryCreativeEvent
+import org.bukkit.potion.PotionEffect
+import org.bukkit.potion.PotionEffectType
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
@@ -63,6 +65,19 @@ class PlayerConcealmentTest {
         PlayerUtil.conceal(poses, p)
         PlayerUtil.reveal(poses, p)
         assertTrue(p.isInvisible)
+    }
+
+    /** Under a potion the server reports the player invisible; that must not become permanent on reveal. */
+    @Test
+    fun potionInvisibilityIsNotMadePermanentByReveal() {
+        val p = player("Potion")
+        val potion = PotionEffect(PotionEffectType.INVISIBILITY, 25, 0, true, false)
+        p.addPotionEffect(potion)
+        p.isInvisible = true // what Paper reports while the potion runs
+        PlayerUtil.conceal(poses, p)
+        PlayerUtil.reveal(poses, p)
+        assertFalse(p.isInvisible)
+        assertTrue(p.hasPotionEffect(PotionEffectType.INVISIBILITY))
     }
 
     @Test

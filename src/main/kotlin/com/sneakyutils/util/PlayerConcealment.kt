@@ -12,6 +12,7 @@ import org.bukkit.event.inventory.InventoryCreativeEvent
 import org.bukkit.event.player.PlayerJoinEvent
 import org.bukkit.event.player.PlayerQuitEvent
 import org.bukkit.plugin.Plugin
+import org.bukkit.potion.PotionEffectType
 import org.bukkit.scheduler.BukkitTask
 import java.util.UUID
 
@@ -20,7 +21,8 @@ import java.util.UUID
  * world as real entities and stay in the tab list. Use it through [PlayerUtil.conceal] / [PlayerUtil.reveal].
  *
  * A concealed player:
- * - is invisible ([Player.setInvisible]), put back as it was when the last owner reveals them;
+ * - is invisible ([Player.setInvisible]), put back as it was when the last owner reveals them (an invisibility potion
+ *   doesn't count as "was invisible": it runs out on its own);
  * - has their held items and armour sent to other players as empty, however often the server re-sends them;
  * - sees their own armour, hotbar and offhand as empty (so nothing's in their hand in first person, or on them in
  *   third person), while the real items stay in their inventory. In Creative, clicks that would write those fake-empty
@@ -64,7 +66,7 @@ class PlayerConcealment internal constructor(private val plugin: Plugin) : Liste
         val set = owners.getOrPut(p.uniqueId) { LinkedHashSet() }
         val first = set.isEmpty()
         if (!set.add(owner.name) || !first) return
-        wasInvisible[p.uniqueId] = p.isInvisible
+        wasInvisible[p.uniqueId] = invisibleWithoutPotion(p)
         p.isInvisible = true
         packets.conceal(p)
         hideRiders(p)
@@ -85,9 +87,27 @@ class PlayerConcealment internal constructor(private val plugin: Plugin) : Liste
     fun owners(p: Player): Set<String> = owners[p.uniqueId]?.toSet() ?: emptySet()
 
     private fun restore(p: Player) {
-        p.isInvisible = wasInvisible.remove(p.uniqueId) ?: false
+        restoreInvisible(p)
         packets.reveal(p)
         showRiders(p.uniqueId)
+    }
+
+    /**
+     * [Player.isInvisible] is also true under an invisibility potion, and [Player.setInvisible] makes it permanent: a
+     * player concealed while a potion ran would come back invisible for good once it had run out. So only invisibility
+     * that isn't the potion's is remembered. (Bukkit can't tell the two apart for a player who has both: they come back
+     * with the potion's only.)
+     */
+    private fun invisibleWithoutPotion(p: Player): Boolean = p.isInvisible && !p.hasPotionEffect(PotionEffectType.INVISIBILITY)
+
+    private fun restoreInvisible(p: Player) {
+        val was = wasInvisible.remove(p.uniqueId) ?: false
+        p.isInvisible = was
+        // Clearing the flag also hides a potion still running: give it back so it shows again.
+        if (!was) p.getPotionEffect(PotionEffectType.INVISIBILITY)?.let {
+            p.removePotionEffect(PotionEffectType.INVISIBILITY)
+            p.addPotionEffect(it)
+        }
     }
 
     private fun forget(id: UUID) {
@@ -157,7 +177,7 @@ class PlayerConcealment internal constructor(private val plugin: Plugin) : Liste
     fun onQuit(e: PlayerQuitEvent) {
         val p = e.player
         if (owners.remove(p.uniqueId) != null) {
-            p.isInvisible = wasInvisible.remove(p.uniqueId) ?: false
+            restoreInvisible(p)
             packets.forget(p.uniqueId)
             showRiders(p.uniqueId)
         }

@@ -783,4 +783,51 @@ class AlteredBlockManagerTest {
         change.undo(false)
         assertThrows(IllegalStateException::class.java) { manager.onUndone(change) { } }
     }
+
+    @Test
+    fun preservedChangeLeavesALaterExternalReplacementAtExpiry() {
+        val manager = SneakyUtils.getAlteredBlockManager()
+        val block = world.getBlockAt(0, 64, 0)
+        block.type = Material.AIR
+        val change = manager.apply("keep", block, Material.LIGHT, false, 5L)
+        manager.preserveExternalEdits(change)
+        var calls = 0
+        manager.onUndone(change) { calls++ }
+        block.type = Material.GOLD_BLOCK // behind the manager's back
+        server.scheduler.performTicks(6)
+        assertEquals(Material.GOLD_BLOCK, block.type)
+        assertEquals(1, calls)
+        assertFalse(manager.isTracked(block))
+    }
+
+    @Test
+    fun preservedChangeStillRestoresWhenBlockIsUntouched() {
+        val manager = SneakyUtils.getAlteredBlockManager()
+        val block = world.getBlockAt(0, 64, 0)
+        block.type = Material.AIR
+        val change = manager.apply("keep", block, Material.LIGHT, false, 5L)
+        manager.preserveExternalEdits(change)
+        server.scheduler.performTicks(6)
+        assertEquals(Material.AIR, block.type)
+        assertFalse(manager.isTracked(block))
+    }
+
+    @Test
+    fun unpreservedChangeStillOverwritesExternalReplacement() {
+        val manager = SneakyUtils.getAlteredBlockManager()
+        val block = world.getBlockAt(0, 64, 0)
+        block.type = Material.AIR
+        manager.apply("plain", block, Material.LIGHT, false, 5L)
+        block.type = Material.GOLD_BLOCK
+        server.scheduler.performTicks(6)
+        assertEquals(Material.AIR, block.type)
+    }
+
+    @Test
+    fun preserveRejectsAChangeThatIsNoLongerActive() {
+        val manager = SneakyUtils.getAlteredBlockManager()
+        val change = manager.apply("gone", world.getBlockAt(0, 64, 0), Material.AIR, false)
+        change.undo(false)
+        assertThrows(IllegalStateException::class.java) { manager.preserveExternalEdits(change) }
+    }
 }

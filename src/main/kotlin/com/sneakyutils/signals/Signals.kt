@@ -3,6 +3,7 @@ package com.sneakyutils.signals
 import org.bukkit.Bukkit
 import org.bukkit.Location
 import org.bukkit.entity.Entity
+import org.bukkit.entity.LivingEntity
 import org.bukkit.entity.Player
 import org.bukkit.event.Event
 import org.bukkit.event.HandlerList
@@ -29,6 +30,27 @@ class ArrestEvent(val paladin: Player?, val suspect: Player, val reason: String)
         fun fire(paladin: Player?, suspect: Player, reason: String) {
             if (HANDLERS.registeredListeners.isEmpty()) return
             Bukkit.getPluginManager().callEvent(ArrestEvent(paladin, suspect, reason))
+        }
+    }
+}
+
+/**
+ * A creature was chained (SneakyPaladins' honour chains, the honour rifle, seeking chains), by a paladin player or by
+ * something else (null). Cages and the like start from this.
+ */
+class ChainedEvent(val target: LivingEntity, val by: Player?) : Event() {
+    override fun getHandlers(): HandlerList = HANDLERS
+
+    companion object {
+        private val HANDLERS = HandlerList()
+
+        @JvmStatic
+        fun getHandlerList(): HandlerList = HANDLERS
+
+        @JvmStatic
+        fun fire(target: LivingEntity, by: Player?) {
+            if (HANDLERS.registeredListeners.isEmpty()) return
+            Bukkit.getPluginManager().callEvent(ChainedEvent(target, by))
         }
     }
 }

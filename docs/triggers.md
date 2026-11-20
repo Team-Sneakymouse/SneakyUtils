@@ -448,11 +448,12 @@ result.rejected.forEach { logger.warning("buttons.yml line ${it.line}: ${it.reas
 ## Signals (`com.sneakyutils.signals`)
 
 Plain synchronous Bukkit events, so plugins can tell each other things without depending on each other:
-`ArrestEvent`, `DutyChangedEvent`, `ActivityEvent`. Listen with `@EventHandler`. Fire with the static helpers, which
+`ArrestEvent`, `ChainedEvent`, `DutyChangedEvent`, `ActivityEvent`. Listen with `@EventHandler`. Fire with the static helpers, which
 build nothing when no plugin listens:
 
 ```kotlin
 ArrestEvent.fire(paladin, suspect, "theft")
+ChainedEvent.fire(target, paladin)      // a creature was chained (the honour chains), by whom (or null)
 ActivityEvent.fire(player, "catch", 1)
 ActivityEvent.fire(player, "harvest", 1, mapOf("mob" to "cow"), cow.location, cow)   // where, and with what
 ```

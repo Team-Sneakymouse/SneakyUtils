@@ -42,6 +42,7 @@ class SignalsTest {
         val loc = Location(server.getWorld("world"), 1.0, 2.0, 3.0)
         assertTrue(ArrestEvent.getHandlerList().registeredListeners.isEmpty())
         ArrestEvent.fire(null, player, "theft")
+        ChainedEvent.fire(player, null)
         DutyChangedEvent.fire(player, true, "paladin")
         ActivityEvent.fire(player, "catch", 1)
     }
@@ -57,6 +58,11 @@ class SignalsTest {
             }
 
             @EventHandler
+            fun chained(e: ChainedEvent) {
+                heard += "chained ${e.target.name} by ${e.by?.name}"
+            }
+
+            @EventHandler
             fun duty(e: DutyChangedEvent) {
                 heard += "duty ${e.player.name} ${e.onDuty} ${e.role}"
             }
@@ -69,6 +75,7 @@ class SignalsTest {
         }, owner)
         val loc = Location(server.getWorld("world"), 1.0, 2.0, 3.0)
         ArrestEvent.fire(null, player, "theft")
+        ChainedEvent.fire(player, player)
         DutyChangedEvent.fire(player, false, "paladin")
         val context = HashMap(mapOf("block" to "iron_ore"))
         ActivityEvent.fire(player, "mine", 3, context)
@@ -79,7 +86,7 @@ class SignalsTest {
         where.x = 99.0 // the event kept its own copy
         assertEquals(
             listOf(
-                "arrest null p theft", "duty p false paladin",
+                "arrest null p theft", "chained p by p", "duty p false paladin",
                 "activity mine 3 {block=iron_ore} at null on null", "activity harvest 1 {mob=cow} at 1 on COW",
             ),
             heard,

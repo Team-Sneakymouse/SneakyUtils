@@ -98,6 +98,10 @@ add(Change, boolean applyPhysics, long durationTicks): void
 - Durations use synchronous Bukkit scheduler ticks (nominally 20 ticks/second),
   not wall-clock time; server lag delays expiration.
 - `applyPhysics` controls both the initial `apply` write and automatic restoration.
+- `onUndone(Change, Runnable)` runs a callback once when an active change is undone for any reason
+  (timed expiry, explicit undo, undo by name/cause, `restoreAll`, or spliced out under a newer change),
+  so a feature can remove what it attached to the change (such as a display entity) without its own
+  expiry. Callbacks are not persisted across restarts; throws `IllegalStateException` for an inactive change.
   For `register`/`add`, it controls restoration only: these APIs never perform the edit.
   Capture original data/state **before** an external edit, then register afterwards.
 - `Change.undo(...)`, `undoAll(...)`, and plugin-disable `restoreAll()` cancel timers.

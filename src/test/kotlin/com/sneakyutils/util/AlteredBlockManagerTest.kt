@@ -734,4 +734,53 @@ class AlteredBlockManagerTest {
         assertEquals(null, manager.previewUndoByCause(c, "explosion"))
         check(c, setOf("explosion"))
     }
+
+    @Test
+    fun undoListenerRunsOnceAtTimedExpiryNotBefore() {
+        val manager = SneakyUtils.getAlteredBlockManager()
+        val block = world.getBlockAt(0, 64, 0)
+        val change = manager.apply("listen", block, Material.AIR, false, 3L)
+        var calls = 0
+        manager.onUndone(change) { calls++ }
+        server.scheduler.performTicks(2)
+        assertEquals(0, calls)
+        server.scheduler.performTicks(5)
+        assertEquals(1, calls)
+        assertFalse(manager.isTracked(block))
+    }
+
+    @Test
+    fun undoListenerRunsOnExplicitUndoAndRestoreAll() {
+        val manager = SneakyUtils.getAlteredBlockManager()
+        var calls = 0
+        val first = manager.apply("listen", world.getBlockAt(0, 64, 0), Material.AIR, false, 100L)
+        manager.onUndone(first) { calls++ }
+        first.undo(false)
+        assertEquals(1, calls)
+        val second = manager.apply("listen", world.getBlockAt(1, 64, 0), Material.AIR, false, 100L)
+        manager.onUndone(second) { calls++ }
+        manager.restoreAll()
+        assertEquals(2, calls)
+    }
+
+    @Test
+    fun undoListenerRunsWhenOlderChangeIsSplicedOut() {
+        val manager = SneakyUtils.getAlteredBlockManager()
+        val block = world.getBlockAt(0, 64, 0)
+        val older = manager.apply("older", block, Material.DIRT, false)
+        var calls = 0
+        manager.onUndone(older) { calls++ }
+        manager.apply("newer", block, Material.GLASS, false)
+        older.undo(false)
+        assertEquals(1, calls)
+        assertEquals(Material.GLASS, block.type)
+    }
+
+    @Test
+    fun undoListenerRejectsAChangeThatIsNoLongerActive() {
+        val manager = SneakyUtils.getAlteredBlockManager()
+        val change = manager.apply("gone", world.getBlockAt(0, 64, 0), Material.AIR, false)
+        change.undo(false)
+        assertThrows(IllegalStateException::class.java) { manager.onUndone(change) { } }
+    }
 }

@@ -61,6 +61,9 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
 
     private val pendingUndos = IdentityHashMap<Change, BukkitTask>()
 
+    /** Callbacks run once when their active change is undone or spliced out; see [onUndone]. */
+    private val undoListeners = IdentityHashMap<Change, MutableList<Runnable>>()
+
     /** Markers removed while their entities were not loaded (see [removeMarker]); dropped as they load. */
     private val removedMarkerIds: MutableSet<UUID> = LinkedHashSet()
 
@@ -387,6 +390,31 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
     fun isTracked(block: Block): Boolean = alteredBlocks.containsKey(block)
 
     /**
+     * Runs [listener] once, on the server thread, right after the active [change] has been undone:
+     * a timed expiry, an explicit undo, an undo-by-name/cause, [restoreAll], or being spliced out
+     * beneath a newer change. For cleaning up what a feature attached to the change (an entity
+     * showing it); the feature must not keep its own expiry. Not persisted: after a restart only
+     * the marker restores the block, so attach only non-persistent things.
+     * Throws [IllegalStateException] when [change] is not active.
+     */
+    fun onUndone(change: Change, listener: Runnable) {
+        val active = alteredBlocks[change.block]?.indexOf(change)?.let { it >= 0 } == true
+        check(active) { "Change at ${change.block.location} is not active" }
+        undoListeners.getOrPut(change) { ArrayList() }.add(listener)
+    }
+
+    private fun fireUndone(change: Change) {
+        val listeners = undoListeners.remove(change) ?: return
+        for (l in listeners) {
+            try {
+                l.run()
+            } catch (e: RuntimeException) {
+                logger.severe("Undo listener for altered block at ${change.block.location} failed: ${e.message}")
+            }
+        }
+    }
+
+    /**
      * Every active change under [internalName], oldest first within each block; blocks in no
      * particular order. Cost grows with the blocks that have such a change, not every tracked block.
      */
@@ -599,6 +627,7 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
             alteredBlock.removeAt(index)
         }
         unindexChange(change, alteredBlock.changes)
+        fireUndone(change)
     }
 
     private fun restoreBlockState(block: Block, restore: Restore, applyPhysics: Boolean, markerId: UUID?) {

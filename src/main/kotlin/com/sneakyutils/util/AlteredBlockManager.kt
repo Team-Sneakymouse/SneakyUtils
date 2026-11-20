@@ -62,6 +62,8 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
     private val pendingUndos = IdentityHashMap<Change, BukkitTask>()
 
     /** Callbacks run once when their active change is undone or spliced out; see [onUndone]. */
+    /** Changes that keep external edits (see [preserveExternalEdits]), with the data they wrote. */
+    private val preservedData = IdentityHashMap<Change, BlockData>()
     private val undoListeners = IdentityHashMap<Change, MutableList<Runnable>>()
 
     /** Markers removed while their entities were not loaded (see [removeMarker]); dropped as they load. */
@@ -403,6 +405,19 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
         undoListeners.getOrPut(change) { ArrayList() }.add(listener)
     }
 
+    /**
+     * Makes undoing [change] leave the world alone if the block no longer holds what [change] wrote:
+     * something replaced it behind the manager's back (WorldEdit, another plugin). The change is then
+     * only spliced out, so a later edit is not overwritten by a stale restore. Judged when the change is
+     * newest at undo time, against the block data as of this call (call right after applying).
+     * Throws [IllegalStateException] when [change] is not active.
+     */
+    fun preserveExternalEdits(change: Change) {
+        val active = alteredBlocks[change.block]?.indexOf(change)?.let { it >= 0 } == true
+        check(active) { "Change at ${change.block.location} is not active" }
+        preservedData[change] = change.block.blockData
+    }
+
     private fun fireUndone(change: Change) {
         val listeners = undoListeners.remove(change) ?: return
         for (l in listeners) {
@@ -608,12 +623,18 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
         val alteredBlock = alteredBlocks[block] ?: return
         val index = alteredBlock.indexOf(change)
         if (index < 0) return
+        val expected = preservedData.remove(change)
         val lastIndex = alteredBlock.changes.size - 1
         if (index == lastIndex) {
             // The entry stays until the restore succeeds, so a failed undo can be retried; a retry
             // does not put the items back twice (see restoredKey).
             whileRestoring(block) {
-                restoreBlockState(block, alteredBlock.restoreAt(index), applyPhysics, alteredBlock.marker?.uniqueId)
+                if (expected == null || block.blockData == expected) {
+                    restoreBlockState(block, alteredBlock.restoreAt(index), applyPhysics, alteredBlock.marker?.uniqueId)
+                } else {
+                    // replaced behind our back: that edit stands, the stale restore is dropped
+                    logger.info("Altered block at ${block.location} was replaced externally; leaving it as is")
+                }
                 alteredBlock.removeAt(index)
                 if (lastIndex == 0) {
                     removeMarker(alteredBlock)

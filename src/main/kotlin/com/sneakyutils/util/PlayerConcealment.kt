@@ -93,12 +93,32 @@ class PlayerConcealment internal constructor(private val plugin: Plugin) : Liste
     }
 
     /**
-     * [Player.isInvisible] is also true under an invisibility potion, and [Player.setInvisible] makes it permanent: a
-     * player concealed while a potion ran would come back invisible for good once it had run out. So only invisibility
-     * that isn't the potion's is remembered. (Bukkit can't tell the two apart for a player who has both: they come back
-     * with the potion's only.)
+     * Whether p was made invisible with [Player.setInvisible], which is what a reveal must put back. [Player.isInvisible]
+     * can't answer that: it is also true under an invisibility potion, and stays true until the next tick after the
+     * potion is removed or runs out. Restoring that reading made concealed players invisible for good. So this reads the
+     * server's own flag (`Entity.persistentInvisibility`, the one `setInvisible` writes); where that can't be read (not
+     * a CraftBukkit server), invisibility without a potion counts.
      */
-    private fun invisibleWithoutPotion(p: Player): Boolean = p.isInvisible && !p.hasPotionEffect(PotionEffectType.INVISIBILITY)
+    private fun invisibleWithoutPotion(p: Player): Boolean =
+        persistentInvisibility(p) ?: (p.isInvisible && !p.hasPotionEffect(PotionEffectType.INVISIBILITY))
+
+    private var persistentField: java.lang.reflect.Field? = null
+    private var persistentUnreadable = false
+
+    private fun persistentInvisibility(p: Player): Boolean? {
+        if (persistentUnreadable) return null
+        return try {
+            val handle = p.javaClass.getMethod("getHandle").invoke(p)
+            val field = persistentField ?: handle.javaClass.getField("persistentInvisibility").also { persistentField = it }
+            field.getBoolean(handle)
+        } catch (ex: ReflectiveOperationException) {
+            persistentUnreadable = true
+            null
+        } catch (ex: RuntimeException) {
+            persistentUnreadable = true
+            null
+        }
+    }
 
     private fun restoreInvisible(p: Player) {
         val was = wasInvisible.remove(p.uniqueId) ?: false

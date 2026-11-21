@@ -10,3 +10,10 @@ player-util:
   duty-cache-ticks: 20
   # characterId and getCharacterName (SneakyCharacterManager). Dropped on character load and rename.
   character-cache-ticks: 20
+waypoints:
+  # Waypoints.guide(player, location, path): run as the player to point them at a place with the server's waypoint.
+  # %path% is the waypoint style the caller picks (paladin, scrying, ...), %world% the world key, %x% %y% %z% block
+  # coordinates, %player% their name.
+  commands:
+    - "findlocation_path %path%"
+    - "findlocation %world% %x% %y% %z% 0 0"

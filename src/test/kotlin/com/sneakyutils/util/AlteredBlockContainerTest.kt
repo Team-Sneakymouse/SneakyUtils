@@ -89,7 +89,7 @@ class AlteredBlockContainerTest {
     }
 
     @Test
-    fun markerCrashRecoveryKeepsContents() {
+    fun recordCrashRecoveryKeepsContents() {
         val manager = SneakyUtils.getAlteredBlockManager()
         val blocks = containers.mapIndexed { i, material -> world.getBlockAt(i, 60, 5) to material }
         val stacks = blocks.map { (block, material) -> fill(block, material) }
@@ -97,9 +97,7 @@ class AlteredBlockContainerTest {
         assertTrue(blocks.all { it.first.type == Material.AIR })
 
         val restarted = AlteredBlockManager(plugin)
-        for (marker in world.entities.filter { it.scoreboardTags.contains(SneakyUtils.ALTERED_BLOCK_TAG) }) {
-            restarted.restoreFromMarker(marker)
-        }
+        restarted.restoreLoadedChunks()
         for ((index, pair) in blocks.withIndex()) {
             assertEquals(pair.second, pair.first.type)
             assertEquals(stacks[index], contents(pair.first), "${pair.second}")
@@ -238,9 +236,7 @@ class AlteredBlockContainerTest {
         SneakyUtils.getAlteredBlockManager().apply("c", block, east, false)
         val left = withdraw(block)
         val restarted = AlteredBlockManager(plugin)
-        for (marker in world.entities.filter { it.scoreboardTags.contains(SneakyUtils.ALTERED_BLOCK_TAG) }) {
-            restarted.restoreFromMarker(marker)
-        }
+        restarted.restoreLoadedChunks()
         assertEquals(Material.CHEST, block.type)
         assertEquals(left, contents(block))
     }
@@ -290,9 +286,7 @@ class AlteredBlockContainerTest {
         val block = world.getBlockAt(1, 60, 17)
         rotateThenReplace(block)
         val restarted = AlteredBlockManager(plugin)
-        for (marker in world.entities.filter { it.scoreboardTags.contains(SneakyUtils.ALTERED_BLOCK_TAG) }) {
-            restarted.restoreFromMarker(marker)
-        }
+        restarted.restoreLoadedChunks()
         assertEquals(Material.CHEST, block.type)
         assertEquals(null, contents(block)) // the items dropped at the replace; none come back twice
     }
@@ -319,9 +313,7 @@ class AlteredBlockContainerTest {
         state.update(true, false)
         if (crash) {
             val restarted = AlteredBlockManager(plugin)
-            for (marker in world.entities.filter { it.scoreboardTags.contains(SneakyUtils.ALTERED_BLOCK_TAG) }) {
-                restarted.restoreFromMarker(marker)
-            }
+            restarted.restoreLoadedChunks()
         } else {
             replace.undo(false) // spliced out
             chestAgain.undo(false)
@@ -347,41 +339,32 @@ class AlteredBlockContainerTest {
 
     // ---- Replays and retries never put items back twice ------------------------------------------
 
-    private fun markers(): List<org.bukkit.entity.Entity> =
-        world.entities.filter { it.scoreboardTags.contains(SneakyUtils.ALTERED_BLOCK_TAG) }
+    private fun recordKey(block: Block) =
+        org.bukkit.NamespacedKey(plugin, "altered_block_at_${block.x and 15}_${block.y}_${block.z and 15}")
 
-    /** Unloads [marker] (the old object goes invalid) and returns a function that loads a copy of it. */
-    private fun unload(marker: org.bukkit.entity.Entity): () -> org.bukkit.entity.Entity {
-        val pdc = marker.persistentDataContainer
-        val location = marker.location
-        val tags = marker.scoreboardTags.toSet()
-        marker.remove()
-        return {
-            val copy = org.mockbukkit.mockbukkit.entity.MarkerMock(server, marker.uniqueId)
-            copy.setLocation(location)
-            tags.forEach { copy.addScoreboardTag(it) }
-            pdc.copyTo(copy.persistentDataContainer, true)
-            server.registerEntity(copy)
-            copy
-        }
-    }
+    /** [block]'s chunk record, or null. */
+    private fun record(block: Block): org.bukkit.persistence.PersistentDataContainer? =
+        block.chunk.persistentDataContainer.get(recordKey(block), org.bukkit.persistence.PersistentDataType.TAG_CONTAINER)
+
+    /** The tile data [block]'s chunk record holds. */
+    private fun recordTileData(block: Block): String? = record(block)!!.get(
+        org.bukkit.NamespacedKey(plugin, "altered_block_state"), org.bukkit.persistence.PersistentDataType.STRING)
 
     @Test
-    fun aMarkerStillThereAfterARestartDoesNotReturnItemsTheUndoAlreadyPutBack() {
+    fun aRestartAfterTheUndoDoesNotReturnItemsAgain() {
+        // The undo removes the record in the same tick it restores the block, so both go into the same
+        // chunk save: nothing is left to restore after a restart.
         val block = world.getBlockAt(1, 60, 25)
         fill(block, Material.CHEST)
         val change = SneakyUtils.getAlteredBlockManager().apply("c", block, Material.AIR, false)
-        val load = unload(markers().single())
-        change.undo(false) // the marker is not loaded: it can't be removed now
+        change.undo(false)
         assertEquals(Material.CHEST, block.type)
+        assertEquals(null, record(block))
         val left = withdraw(block)
 
-        // A restart before its entities loaded: the marker is still saved in the chunk.
-        val marker = load()
-        AlteredBlockManager(plugin).restoreFromMarker(marker)
+        AlteredBlockManager(plugin).restoreLoadedChunks()
         assertEquals(left, contents(block))
         assertTrue(droppedItems().isEmpty(), "dropped a second copy")
-        assertTrue(!marker.isValid)
     }
 
     // ---- register/add: an external edit keeps custody of the items ------------------------------
@@ -402,15 +385,13 @@ class AlteredBlockContainerTest {
         block.type = Material.BARREL
         val change = if (path == "timed") manager.register("c", block, fromData, fromState, false, 2L)
         else manager.register("c", block, fromData, fromState)
-        val marker = markers().single()
-        val json = marker.persistentDataContainer.get(
-            org.bukkit.NamespacedKey(plugin, "altered_block_state"), org.bukkit.persistence.PersistentDataType.STRING)
-        assertTrue(json == null || !json.contains("\"items\""), "the marker holds the items: $json")
+        val json = recordTileData(block)
+        assertTrue(json == null || !json.contains("\"items\""), "the record holds the items: $json")
 
         when (path) {
             "undo" -> change.undo(false)
             "timed" -> server.scheduler.performTicks(2)
-            else -> AlteredBlockManager(plugin).restoreFromMarker(marker)
+            else -> AlteredBlockManager(plugin).restoreLoadedChunks()
         }
         assertEquals(Material.CHEST, block.type)
         val held = (block.state as TileStateInventoryHolder).snapshotInventory.contents.filterNotNull()
@@ -444,41 +425,13 @@ class AlteredBlockContainerTest {
         val change = manager.apply("c", block, east, true)
         assertEquals(1, rejected.size)
         assertEquals(listOf(change), manager.getByBlock(block))
-        val json = markers().single().persistentDataContainer.get(
-            org.bukkit.NamespacedKey(plugin, "altered_block_state"), org.bukkit.persistence.PersistentDataType.STRING)
-        assertTrue(json == null || !json.contains("\"items\""), "the marker holds the dropped items: $json")
+        val json = recordTileData(block)
+        assertTrue(json == null || !json.contains("\"items\""), "the record holds the dropped items: $json")
 
         change.undo(false)
         assertEquals(Material.CHEST, block.type)
         assertTrue((block.state as TileStateInventoryHolder).snapshotInventory.contents.filterNotNull().isEmpty())
         assertEquals(listOf(stack), droppedItems()) // only the copy the break dropped
-    }
-
-    @Test
-    fun aRefusedRecoveryMarkerLeavesTheItemsToPaper() {
-        server.pluginManager.registerEvents(object : org.bukkit.event.Listener {
-            @org.bukkit.event.EventHandler
-            fun on(event: org.bukkit.event.entity.EntitySpawnEvent) {
-                if (event.entity is org.bukkit.entity.Marker) event.isCancelled = true
-            }
-        }, plugin)
-        val manager = SneakyUtils.getAlteredBlockManager()
-        val block = world.getBlockAt(1, 60, 43)
-        val stack = fill(block, Material.CHEST)
-        val live = (block.state as TileStateInventoryHolder).inventory
-
-        val change = manager.apply("c", block, Material.AIR, false)
-        assertEquals(Material.AIR, block.type)
-        assertEquals(stack, live.getItem(0), "the manager took items it has no marker for")
-        assertTrue(markers().isEmpty())
-        assertEquals(listOf(change), manager.getByBlock(block)) // still registered, as on origin/main
-
-        // Paper drops them as the block entity goes; model that, then undo writes no copy back.
-        (block.state as TileStateInventoryHolder).snapshotInventory.clear()
-        change.undo(false)
-        assertEquals(Material.CHEST, block.type)
-        assertEquals(null, contents(block))
-        assertTrue(!manager.isTracked(block))
     }
 
     /** Runs [onSpawn] from inside every ItemSpawnEvent, as another plugin's listener would. */
@@ -501,13 +454,12 @@ class AlteredBlockContainerTest {
         val state = block.getState(true) as TileStateInventoryHolder
         state.snapshotInventory.setItem(0, placed)
         state.update(true, false)
-        val marker = markers().single()
         val restarted = AlteredBlockManager(plugin)
 
         // The saved diamonds drop beside the filled chest; the listener reenters on that spawn.
         val rejected = ArrayList<Throwable>()
         onItemSpawn {
-            if (crash) restarted.restoreFromMarker(marker) else chestAgain.undo(false)
+            if (crash) restarted.restoreChunk(block.chunk) else chestAgain.undo(false)
             try {
                 (if (crash) restarted else manager).apply("x", block, Material.GLASS, false)
             } catch (e: IllegalStateException) {
@@ -515,7 +467,7 @@ class AlteredBlockContainerTest {
             }
         }
         if (crash) {
-            restarted.restoreFromMarker(marker)
+            restarted.restoreChunk(block.chunk)
         } else {
             replace.undo(false) // spliced out
             chestAgain.undo(false)
@@ -525,7 +477,7 @@ class AlteredBlockContainerTest {
         assertEquals(placed, contents(block))
         assertEquals(listOf(saved), droppedItems()) // dropped once
         assertEquals(1, rejected.size) // the new change on the block was refused, not half-applied
-        assertTrue(markers().isEmpty())
+        assertEquals(null, record(block))
     }
 
     @Test
@@ -540,29 +492,30 @@ class AlteredBlockContainerTest {
         org.junit.jupiter.api.assertThrows<IllegalStateException> { change.undo(false) }
         assertTrue(manager.isTracked(block))
         assertEquals(listOf(change), manager.getByBlock(block))
-        assertEquals(1, markers().size)
+        assertTrue(manager.hasRecord(block))
 
         change.undo(false)
         assertEquals(Material.CHEST, block.type)
         assertEquals(stack, contents(block))
         assertTrue(!manager.isTracked(block))
-        assertTrue(markers().isEmpty())
+        assertTrue(!manager.hasRecord(block))
         assertTrue(droppedItems().isEmpty())
     }
 
     @Test
-    fun aReplayedMarkerRestoreDoesNotPutItsItemsBackTwice() {
-        // Crash recovery that got as far as writing the items, then ran again (an exception after
-        // the write, or the marker loading twice): the second run changes nothing.
+    fun aReplayedRecordRestoreDoesNotPutItsItemsBackTwice() {
+        // Crash recovery that got as far as writing the items, then ran again with the record still
+        // there (an exception after the write): the second run changes nothing.
         val block = world.getBlockAt(1, 60, 29)
         val stack = fill(block, Material.CHEST)
         SneakyUtils.getAlteredBlockManager().apply("c", block, Material.AIR, false)
-        val load = unload(markers().single())
-        val first = load()
-        AlteredBlockManager(plugin).restoreFromMarker(first)
+        val saved = record(block)!!
+        AlteredBlockManager(plugin).restoreLoadedChunks()
         assertEquals(stack, contents(block))
+        assertEquals(null, record(block))
         val left = withdraw(block)
-        AlteredBlockManager(plugin).restoreFromMarker(load())
+        block.chunk.persistentDataContainer.set(recordKey(block), org.bukkit.persistence.PersistentDataType.TAG_CONTAINER, saved)
+        AlteredBlockManager(plugin).restoreLoadedChunks()
         assertEquals(left, contents(block))
         assertTrue(droppedItems().isEmpty())
     }
@@ -601,17 +554,15 @@ class AlteredBlockContainerTest {
         val change = manager.apply("c", block, Material.AIR, false)
         assertEquals(Material.MUSIC_DISC_CAT, (block.state as org.bukkit.block.Jukebox).record.type) // not taken
         if (crash) {
-            val marker = markers().single()
-            val stateKey = org.bukkit.NamespacedKey(plugin, "altered_block_state")
-            assertTrue(!marker.persistentDataContainer.has(stateKey), "the marker saved jukebox tile data")
+            assertEquals(null, recordTileData(block), "the record saved jukebox tile data")
             // MockBukkit can't parse "minecraft:jukebox[has_record=false]", so the block type isn't
-            // checked here; recovery must still run without touching the record and remove the marker.
-            AlteredBlockManager(plugin).restoreFromMarker(marker)
+            // checked here; recovery must still run without touching the disc and remove the record.
+            AlteredBlockManager(plugin).restoreLoadedChunks()
         } else {
             change.undo(false)
             assertEquals(Material.JUKEBOX, block.type)
         }
-        assertTrue(markers().isEmpty())
+        assertEquals(null, record(block))
     }
 
     // ---- Markers written by older builds -------------------------------------------------------

@@ -9,11 +9,13 @@ import org.bukkit.event.world.EntitiesLoadEvent
 
 class AlteredBlockListener : Listener {
 
-    // Legacy path: entities may already be present with the chunk. On modern Paper they usually
-    // are not, so EntitiesLoadEvent below is the primary path. Both are safe to run for one marker:
-    // restoreFromMarker removes the entity, and an invalid entity is ignored on a second pass.
+    // Records in the chunk's PDC are there as soon as the chunk loads: restore the ones a crash left.
+    // Legacy markers (written before chunk records) may already be present with the chunk; on modern
+    // Paper they usually are not, so EntitiesLoadEvent below is their primary path. Both are safe to
+    // run for one marker: restoreFromMarker removes the entity, and an invalid entity is ignored.
     @EventHandler
     fun onChunkLoad(event: ChunkLoadEvent) {
+        SneakyUtils.getAlteredBlockManager().restoreChunk(event.chunk)
         restoreOrphans(event.chunk.entities.asList())
     }
 
@@ -27,8 +29,6 @@ class AlteredBlockListener : Listener {
         for (entity in ArrayList(entities)) {
             if (!entity.isValid) continue
             if (!entity.scoreboardTags.contains(SneakyUtils.ALTERED_BLOCK_TAG)) continue
-            // Its change was already undone while it was unloaded: remove it, don't restore again.
-            if (manager.discardRemovedMarker(entity)) continue
             val block = manager.getMarkedBlock(entity)
             if (block != null && manager.isTracked(block)) continue
             manager.restoreFromMarker(entity)

@@ -227,7 +227,7 @@ class AlteredBlockManagerTest {
         server.scheduler.performTicks(2)
         assertEquals(Material.STONE, block.type)
         assertFalse(manager.isTracked(block))
-        assertTrue(world.entities.none { it.scoreboardTags.contains(SneakyUtils.ALTERED_BLOCK_TAG) })
+        assertFalse(manager.hasRecord(block))
     }
 
     @Test
@@ -506,7 +506,7 @@ class AlteredBlockManagerTest {
         b.undo(false)
         assertEquals(Material.STONE, block.type)
         assertFalse(manager.isTracked(block))
-        assertTrue(world.entities.none { it.scoreboardTags.contains(SneakyUtils.ALTERED_BLOCK_TAG) })
+        assertFalse(manager.hasRecord(block))
     }
 
     @Test

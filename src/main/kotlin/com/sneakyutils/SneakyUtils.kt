@@ -86,6 +86,8 @@ open class SneakyUtils : JavaPlugin() {
         enabledOnce = true
         alteredBlockManager = AlteredBlockManager(this)
         server.pluginManager.registerEvents(AlteredBlockListener(), this)
+        // Chunks loaded before this plugin enabled (spawn chunks) fired no ChunkLoadEvent for it.
+        alteredBlockManager?.restoreLoadedChunks()
         playerConcealment = PlayerConcealment(this).also { it.start() }
         saveDefaultConfig()
         PlayerCheckCache.active = PlayerCheckCache(this).also {

@@ -10,8 +10,8 @@ import io.papermc.paper.registry.RegistryAccess
 import io.papermc.paper.registry.RegistryKey
 import net.kyori.adventure.text.serializer.gson.GsonComponentSerializer
 import org.bukkit.Bukkit
+import org.bukkit.Chunk
 import org.bukkit.DyeColor
-import org.bukkit.Location
 import org.bukkit.Material
 import org.bukkit.NamespacedKey
 import org.bukkit.World
@@ -31,8 +31,8 @@ import org.bukkit.block.data.BlockData
 import org.bukkit.block.sign.Side
 import org.bukkit.entity.Entity
 import org.bukkit.entity.EntityType
-import org.bukkit.entity.Marker
 import org.bukkit.inventory.ItemStack
+import org.bukkit.persistence.PersistentDataContainer
 import org.bukkit.persistence.PersistentDataType
 import org.bukkit.plugin.java.JavaPlugin
 import org.bukkit.scheduler.BukkitTask
@@ -48,9 +48,10 @@ import java.util.logging.Logger
  * Automatic undo uses the supplied physics flag; explicit undo may override it and cancels the timer.
  * Register each Change instance only once while active, and undo that exact instance.
  *
- * Each block keeps every change made to it, oldest first, and one persistent marker holding the
- * block's original state (the crash fallback). Undoing the newest change writes the state it
- * replaced. Undoing an older change leaves the world alone and splices it out: the change above it
+ * Each block keeps every change made to it, oldest first, and one persistent record holding the
+ * block's original state (the crash fallback). The record lives in the chunk's own PDC, which is
+ * saved in the same chunk write as the block itself, so after a crash a chunk's records always
+ * match its blocks. Undoing the newest change writes the state it replaced. Undoing an older change leaves the world alone and splices it out: the change above it
  * takes over its restore state, so later undos still end at the original.
  *
  * Changes may carry causes from the fixed set in [AlteredBlockCauses] (such as `"explosion"`), so
@@ -66,17 +67,6 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
     private val preservedData = IdentityHashMap<Change, BlockData>()
     private val undoListeners = IdentityHashMap<Change, MutableList<Runnable>>()
 
-    /** Markers removed while their entities were not loaded (see [removeMarker]); dropped as they load. */
-    private val removedMarkerIds: MutableSet<UUID> = LinkedHashSet()
-
-    /** Most UUIDs [removedMarkerIds] keeps; the oldest go first, with a warning. */
-    internal var removedMarkerCap = 4096
-
-    /** Size of [removedMarkerIds]; for tests. */
-    internal val removedMarkerCount: Int get() = removedMarkerIds.size
-
-    /** How long [removeMarker] keeps looking for a marker that was not loaded, in ticks. */
-    private val markerRetryTicks = 100L
     private val alteredBlocks: MutableMap<Block, AlteredBlock> = HashMap()
 
     /** Tracked blocks by world UID, then chunk key. Kept in step with [alteredBlocks] for [getBlocksInBox]. */
@@ -98,23 +88,26 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
     private val yKey = NamespacedKey(plugin, "altered_block_y")
     private val zKey = NamespacedKey(plugin, "altered_block_z")
 
+    /** Inside a chunk record: the record's id, which [restoredKey] stamps (as a marker's UUID did). */
+    private val recordIdKey = NamespacedKey(plugin, "altered_block_id")
+
     /**
-     * Set on markers that follow this build's inventory custody rules (only a block's first change
-     * holds items, and only items it took out of the world). Markers without it come from older
-     * builds and are recovered as those builds did.
+     * Set on chunk records, and on markers written by the last marker builds, that follow the current
+     * inventory custody rules (only a block's first change holds items, and only items it took out of
+     * the world). Markers without it come from older builds and are recovered as those builds did.
      */
     private val formatKey = NamespacedKey(plugin, "altered_block_format")
 
     /**
-     * Written into a block entity's own PDC, in the same state update that puts a marker's captured
-     * items back: the marker's UUID. A replay of that marker (a retry after an exception, or a marker
-     * that loads after a restart although its change was already undone) sees the items are back.
+     * Written into a block entity's own PDC, in the same state update that puts a record's captured
+     * items back: the record's id (a legacy marker's UUID). A replay of that record (a retry after an
+     * exception, or a legacy marker that loads again) sees the items are back.
      */
     private val restoredKey = NamespacedKey(plugin, "altered_block_restored")
 
     /**
      * Blocks being changed by [apply] (until registered) or restored (an undo, or recovery from a
-     * marker). These call other code synchronously (EntitySpawnEvent, BlockPhysicsEvent, a displaced
+     * record or legacy marker). These call other code synchronously (BlockPhysicsEvent, a displaced
      * item's ItemSpawnEvent), which must not change the same block meanwhile: an undo there is
      * ignored, a new change throws.
      */
@@ -139,15 +132,15 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
      */
     fun add(change: Change) {
         checkNotRestoring(change.block)
-        addChange(change, takesInventory = false, applied = false, appliedMarker = null)
+        addChange(change, takesInventory = false, appliedRecordId = null)
     }
 
     /**
-     * [add]. From [apply] ([applied]), the block's marker (if it is the block's first change) was
-     * already spawned as [appliedMarker], null when Paper refused it, and [takesInventory] says whether
-     * apply took the live items (see [AlteredBlock.push]).
+     * [add]. From [apply], [takesInventory] says whether apply took the live items (see
+     * [AlteredBlock.push]) and [appliedRecordId] is the chunk record apply already wrote for a
+     * block's first change; otherwise a block's first change writes its record here.
      */
-    private fun addChange(change: Change, takesInventory: Boolean, applied: Boolean, appliedMarker: Entity?) {
+    private fun addChange(change: Change, takesInventory: Boolean, appliedRecordId: UUID?) {
         val isNew = !alteredBlocks.containsKey(change.block)
         val alteredBlock = alteredBlocks.computeIfAbsent(change.block) { AlteredBlock(change) }
         alteredBlock.push(change, takesInventory)
@@ -155,8 +148,7 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
         for (cause in change.causes) blocksByCause.getOrPut(cause) { HashSet() }.add(change.block)
         if (isNew) {
             indexBlock(change.block)
-            alteredBlock.marker = if (applied) appliedMarker
-            else spawnMarker(change.block, change.fromData, alteredBlock.restoreAt(0).tileData())
+            alteredBlock.recordId = appliedRecordId ?: writeRecord(change.block, alteredBlock.restoreAt(0))
         }
     }
 
@@ -228,29 +220,18 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
         val fromData = block.blockData
         val fromState = block.state
         val first = !isTracked(block)
-        // Guarded until registered: the marker spawn and the block write call other plugins
-        // synchronously (EntitySpawnEvent, BlockPhysicsEvent), which must not edit this block meanwhile.
+        // Guarded until registered: the block write calls other plugins synchronously
+        // (BlockPhysicsEvent), which must not edit this block meanwhile.
         return whileRestoring(block) {
-            var marker: Entity? = null
-            var tookItems = false
-            if (first) {
-                // The recovery marker comes first: only once Paper has accepted it may the live items
-                // move into the change's custody. If it was refused, Paper handles them as without the
-                // manager (they drop when the block entity goes).
-                marker = spawnMarker(block, fromData, null).takeIf { it.isValid }
-                if (marker == null) {
-                    logger.warning("Recovery marker for altered block at ${block.location} was refused; " +
-                        "leaving its items to Paper")
-                } else {
-                    // After the capture: the snapshot keeps the items.
-                    tookItems = emptyLiveInventory(block, newData)
-                    val tileData = if (tookItems) serializeTileData(fromState) else serializeTileDataWithoutItems(fromState)
-                    if (tileData != null) marker.persistentDataContainer.set(blockStateKey, PersistentDataType.STRING, tileData)
-                }
-            }
+            // After the capture: the snapshot keeps the items.
+            val tookItems = first && emptyLiveInventory(block, newData)
+            // The record goes in before the block write, so a write that throws leaves the taken items
+            // in a record its chunk restores on the next load. Both are in the same tick, so a chunk
+            // save holds the record and the changed block together.
+            val recordId = if (first) writeRecord(block, Restore(fromData, fromState, tookItems)) else null
             block.setBlockData(newData, applyPhysics)
             val change = Change(internalName, block, fromData, fromState, causes.toSet())
-            addChange(change, takesInventory = tookItems, applied = true, appliedMarker = marker)
+            addChange(change, takesInventory = tookItems, appliedRecordId = recordId)
             change
         }
     }
@@ -375,8 +356,8 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
 
     /**
      * Undoes every tracked change (called on plugin disable so a reload does not leave blocks
-     * altered). Markers are removed with each restore; any marker that survives a crash is restored
-     * when its entities next load.
+     * altered). Records are removed with each restore; any record that survives a crash is restored
+     * when its chunk next loads (see [restoreChunk]).
      */
     fun restoreAll() {
         val changes = alteredBlocks.values.flatMap { it.changes }
@@ -396,7 +377,7 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
      * a timed expiry, an explicit undo, an undo-by-name/cause, [restoreAll], or being spliced out
      * beneath a newer change. For cleaning up what a feature attached to the change (an entity
      * showing it); the feature must not keep its own expiry. Not persisted: after a restart only
-     * the marker restores the block, so attach only non-persistent things.
+     * the chunk record restores the block, so attach only non-persistent things.
      * Throws [IllegalStateException] when [change] is not active.
      */
     fun onUndone(change: Change, listener: Runnable) {
@@ -630,14 +611,15 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
             // does not put the items back twice (see restoredKey).
             whileRestoring(block) {
                 if (expected == null || block.blockData == expected) {
-                    restoreBlockState(block, alteredBlock.restoreAt(index), applyPhysics, alteredBlock.marker?.uniqueId)
+                    restoreBlockState(block, alteredBlock.restoreAt(index), applyPhysics, alteredBlock.recordId)
                 } else {
                     // replaced behind our back: that edit stands, the stale restore is dropped
                     logger.info("Altered block at ${block.location} was replaced externally; leaving it as is")
                 }
                 alteredBlock.removeAt(index)
                 if (lastIndex == 0) {
-                    removeMarker(alteredBlock)
+                    removeRecord(block)
+                    alteredBlock.recordId = null
                     alteredBlocks.remove(block)
                     unindexBlock(block)
                 }
@@ -651,30 +633,30 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
         fireUndone(change)
     }
 
-    private fun restoreBlockState(block: Block, restore: Restore, applyPhysics: Boolean, markerId: UUID?) {
+    private fun restoreBlockState(block: Block, restore: Restore, applyPhysics: Boolean, recordId: UUID?) {
         block.setBlockData(restore.data, applyPhysics)
         val tileData = restore.tileData()
         if (tileData != null) {
-            if (markerId != null) writeTileData(block, tileData, applyPhysics, markerId)
+            if (recordId != null) writeTileData(block, tileData, applyPhysics, recordId)
             else applySerializedTileData(block, tileData, applyPhysics)
         }
     }
 
     /**
-     * [applySerializedTileData] for tile data held by [markerId]'s change, whose items it took out of
-     * the world. The items go back at most once: with them the block entity gets [restoredKey] set
-     * to [markerId], and if it already has that, they are back and are left out. They never
-     * overwrite a live inventory that still holds items (a block entity that survived because a
-     * later change placed the same block type again and players filled it): those stay, and the
-     * saved items drop at the block instead.
+     * [applySerializedTileData] for tile data held by [recordId]'s change (a chunk record, or a legacy
+     * marker's UUID), whose items it took out of the world. The items go back at most once: with them
+     * the block entity gets [restoredKey] set to [recordId], and if it already has that, they are back
+     * and are left out. They never overwrite a live inventory that still holds items (a block entity
+     * that survived because a later change placed the same block type again and players filled it):
+     * those stay, and the saved items drop at the block instead.
      */
-    private fun writeTileData(block: Block, json: String, applyPhysics: Boolean, markerId: UUID) {
+    private fun writeTileData(block: Block, json: String, applyPhysics: Boolean, recordId: UUID) {
         val root = JsonParser.parseString(json).asJsonObject
         if (!root.has("items")) {
             applySerializedTileData(block, json, applyPhysics)
             return
         }
-        if (itemsRestored(block, markerId)) {
+        if (itemsRestored(block, recordId)) {
             root.remove("items")
             applyTileData(block, root, applyPhysics, null)
             return
@@ -689,7 +671,7 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
             displaced = decodeItems(root.get("items").asString)
             root.remove("items")
         }
-        applyTileData(block, root, applyPhysics, restoredKey to markerId.toString())
+        applyTileData(block, root, applyPhysics, restoredKey to recordId.toString())
         if (displaced != null) {
             val at = block.location.add(0.5, 0.5, 0.5)
             for (item in displaced) {
@@ -698,14 +680,16 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
         }
     }
 
-    /** Whether [block]'s block entity already got the items of [markerId]'s change back (see [restoredKey]). */
-    private fun itemsRestored(block: Block, markerId: UUID): Boolean {
+    /** Whether [block]'s block entity already got the items of [recordId]'s change back (see [restoredKey]). */
+    private fun itemsRestored(block: Block, recordId: UUID): Boolean {
         val state = block.getState(false) as? TileState ?: return false
-        return state.persistentDataContainer.get(restoredKey, PersistentDataType.STRING) == markerId.toString()
+        return state.persistentDataContainer.get(restoredKey, PersistentDataType.STRING) == recordId.toString()
     }
 
     /**
-     * Resolves the block this marker was created for (from PDC), falling back to the entity's current block.
+     * Resolves the block a legacy marker was created for (from PDC), falling back to the entity's
+     * current block. This build writes chunk records instead of markers; markers left by a crash under
+     * an older build are still recovered as their entities load.
      */
     fun getMarkedBlock(entity: Entity?): Block? {
         if (entity == null) return null
@@ -729,7 +713,7 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
     }
 
     /**
-     * Restores a block from an orphan marker (prior session) and removes the entity.
+     * Restores a block from an orphan legacy marker (a crash under an older build) and removes the entity.
      */
     fun restoreFromMarker(entity: Entity?) {
         if (entity == null || !entity.isValid) return
@@ -775,100 +759,103 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
         entity.remove()
     }
 
-    private fun spawnMarker(block: Block, originalData: BlockData, tileData: String?): Marker {
-        val loc: Location = block.location.add(0.5, 0.5, 0.5)
-        val marker = block.world.spawnEntity(loc, EntityType.MARKER) as Marker
-        marker.isPersistent = true
-        marker.setGravity(false)
-        marker.isSilent = true
-        marker.isInvulnerable = true
-        marker.addScoreboardTag(SneakyUtils.ALTERED_BLOCK_TAG)
-        val pdc = marker.persistentDataContainer
-        pdc.set(formatKey, PersistentDataType.INTEGER, MARKER_FORMAT)
-        pdc.set(blockDataKey, PersistentDataType.STRING, originalData.asString)
-        if (tileData != null) {
-            pdc.set(blockStateKey, PersistentDataType.STRING, tileData)
-        }
-        pdc.set(worldKey, PersistentDataType.STRING, block.world.uid.toString())
-        pdc.set(xKey, PersistentDataType.INTEGER, block.x)
-        pdc.set(yKey, PersistentDataType.INTEGER, block.y)
-        pdc.set(zKey, PersistentDataType.INTEGER, block.z)
-        return marker
-    }
+    /** The chunk PDC key of [block]'s record: chunk-relative x and z, world y. */
+    private fun recordKey(block: Block): NamespacedKey =
+        NamespacedKey(plugin, "$RECORD_PREFIX${block.x and 15}_${block.y}_${block.z and 15}")
 
     /**
-     * Removes [alteredBlock]'s marker. After its chunk unloaded and loaded again, the held entity is a
-     * stale object, so the live one is looked up by UUID. If it is not loaded right now, its UUID is
-     * remembered and the marker is discarded, without restoring, when it next loads in this session.
+     * Writes [block]'s recovery record into its chunk's PDC: [restore]'s BlockData and tile data, and a
+     * fresh id for [restoredKey]. Returns the id. A record left at that position (there should be none:
+     * [restoreChunk] recovers them as the chunk loads) is replaced, with a warning.
      */
-    private fun removeMarker(alteredBlock: AlteredBlock) {
-        val marker = alteredBlock.marker
-        if (marker != null) {
-            val live = if (marker.isValid) marker else Bukkit.getEntity(marker.uniqueId)?.takeIf { it.isValid }
-            if (live != null) {
-                live.remove()
-            } else {
-                rememberRemovedMarker(marker.uniqueId)
-                retryMarkerRemoval(marker.uniqueId, marker.location)
+    private fun writeRecord(block: Block, restore: Restore): UUID {
+        val pdc = block.chunk.persistentDataContainer
+        val key = recordKey(block)
+        if (pdc.has(key)) logger.warning("Replaced a leftover altered-block record at ${block.location}")
+        val id = UUID.randomUUID()
+        val record = pdc.adapterContext.newPersistentDataContainer()
+        record.set(formatKey, PersistentDataType.INTEGER, RECORD_FORMAT)
+        record.set(recordIdKey, PersistentDataType.STRING, id.toString())
+        record.set(blockDataKey, PersistentDataType.STRING, restore.data.asString)
+        restore.tileData()?.let { record.set(blockStateKey, PersistentDataType.STRING, it) }
+        pdc.set(key, PersistentDataType.TAG_CONTAINER, record)
+        return id
+    }
+
+    private fun removeRecord(block: Block) {
+        block.chunk.persistentDataContainer.remove(recordKey(block))
+    }
+
+    /** Whether [block]'s chunk holds a recovery record for it; for tests and tools. */
+    fun hasRecord(block: Block): Boolean = block.chunk.persistentDataContainer.has(recordKey(block))
+
+    /**
+     * Restores every block in [chunk] whose recovery record survived a crash (no change for it is
+     * tracked in this session) and removes those records. Called as each chunk loads, and for the chunks
+     * already loaded when the plugin enables (see [restoreLoadedChunks]). Records of tracked blocks
+     * belong to their live changes and are left alone. A record whose restore threw stays and is tried
+     * again the next time the chunk loads.
+     */
+    fun restoreChunk(chunk: Chunk) {
+        val pdc = chunk.persistentDataContainer
+        val namespace = blockDataKey.namespace
+        val keys = pdc.keys.filter { it.namespace == namespace && it.key.startsWith(RECORD_PREFIX) }
+        for (key in keys) {
+            val parts = key.key.removePrefix(RECORD_PREFIX).split('_')
+            val x = parts.getOrNull(0)?.toIntOrNull()
+            val y = parts.getOrNull(1)?.toIntOrNull()
+            val z = parts.getOrNull(2)?.toIntOrNull()
+            // Gone already: a listener called back during an earlier restore in this loop restored it.
+            if (!pdc.has(key)) continue
+            // Paper throws when the stored tag is of another type.
+            val record = try { pdc.get(key, PersistentDataType.TAG_CONTAINER) } catch (_: IllegalArgumentException) { null }
+            if (parts.size != 3 || x == null || y == null || z == null || x !in 0..15 || z !in 0..15 || record == null) {
+                logger.severe("Dropped malformed altered-block record ${key.key} in chunk ${chunk.x}, ${chunk.z}")
+                pdc.remove(key)
+                continue
+            }
+            val block = chunk.getBlock(x, y, z)
+            if (isTracked(block) || block in restoring) continue
+            try {
+                whileRestoring(block) { restoreFromRecord(block, record) }
+                pdc.remove(key)
+            } catch (e: RuntimeException) {
+                logger.severe("Failed to restore altered block at ${block.location} from its record: ${e.message}")
             }
         }
-        alteredBlock.marker = null
+    }
+
+    /** [restoreChunk] for every chunk loaded right now, in every world. */
+    fun restoreLoadedChunks() {
+        for (world in Bukkit.getWorlds()) {
+            for (chunk in world.loadedChunks) restoreChunk(chunk)
+        }
+    }
+
+    private fun restoreFromRecord(block: Block, record: PersistentDataContainer) {
+        val id = record.get(recordIdKey, PersistentDataType.STRING)?.let {
+            try { UUID.fromString(it) } catch (_: IllegalArgumentException) { null }
+        }
+        // Its items are already back (a restore that ran but whose record removal did not happen).
+        if (id != null && itemsRestored(block, id)) return
+        val dataString = record.get(blockDataKey, PersistentDataType.STRING) ?: return
+        try {
+            block.setBlockData(Bukkit.createBlockData(dataString), false)
+        } catch (_: IllegalArgumentException) {
+            logger.severe("Invalid altered-block record BlockData at ${block.location}: $dataString")
+            return
+        }
+        val stateString = record.get(blockStateKey, PersistentDataType.STRING) ?: return
+        try {
+            if (id != null) writeTileData(block, stateString, false, id)
+            else applySerializedTileData(block, stateString, false)
+        } catch (e: RuntimeException) {
+            logger.severe("Invalid altered-block record tile data at ${block.location}: ${e.message}")
+        }
     }
 
     /**
-     * Looks for the unloaded marker [id] every tick for [markerRetryTicks] and removes it once it is
-     * loaded (a chunk's entities load just after the chunk), so a restart has as small a window as
-     * possible to find it still there. Not while the plugin is disabling (restoreAll on shutdown).
-     */
-    private fun retryMarkerRemoval(id: UUID, location: Location) {
-        if (!plugin.isEnabled) return
-        var ticks = 0L
-        lateinit var task: BukkitTask
-        task = Bukkit.getScheduler().runTaskTimer(plugin, Runnable {
-            val entity = Bukkit.getEntity(id)
-            if (entity != null && entity.isValid) {
-                entity.remove()
-                removedMarkerIds.remove(id)
-                task.cancel()
-            } else if (id !in removedMarkerIds) {
-                task.cancel()
-            } else if (++ticks >= markerRetryTicks) {
-                // Its chunk's entities are loaded and it is not among them: it was deleted (an admin,
-                // a cleanup plugin) and can never load, so stop waiting for it. Otherwise keep it.
-                if (entitiesLoaded(location)) removedMarkerIds.remove(id)
-                task.cancel()
-            }
-        }, 1L, 1L)
-    }
-
-    private fun entitiesLoaded(location: Location): Boolean {
-        val world = location.world ?: return false
-        val cx = location.blockX shr 4
-        val cz = location.blockZ shr 4
-        return world.isChunkLoaded(cx, cz) && world.getChunkAt(cx, cz).isEntitiesLoaded
-    }
-
-    private fun rememberRemovedMarker(id: UUID) {
-        removedMarkerIds.add(id)
-        if (removedMarkerIds.size <= removedMarkerCap) return
-        val oldest = removedMarkerIds.iterator().next()
-        removedMarkerIds.remove(oldest)
-        logger.warning("Forgot removed altered-block marker $oldest (over $removedMarkerCap pending); " +
-            "if it loads it restores its block once more")
-    }
-
-    /**
-     * When [entity] is a marker this session already removed while it was unloaded, removes it and
-     * returns true; the listener then skips restoring from it. Called as marker entities load.
-     */
-    internal fun discardRemovedMarker(entity: Entity): Boolean {
-        if (!removedMarkerIds.remove(entity.uniqueId)) return false
-        if (entity.isValid) entity.remove()
-        return true
-    }
-
-    /**
-     * One tracked block: its original state (also stored on the marker) and its active changes,
+     * One tracked block: its original state (also stored in its chunk record) and its active changes,
      * oldest first, each with the state undoing it writes back.
      */
     class AlteredBlock(change: Change) {
@@ -879,12 +866,14 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
 
         /** Active changes, oldest first (read-only view). */
         val changes: List<Change> get() = entries
-        var marker: Entity? = null
+
+        /** Id of the block's chunk record (see [writeRecord]), stamped by [restoredKey]. */
+        var recordId: UUID? = null
 
         /**
          * Adds [change], whose new block is already in the world (after apply's write, or after the
          * external edit a register/add records). Only a change whose apply actually took the live items
-         * ([takesInventory]: the block's first change, its marker accepted, the material changing)
+         * ([takesInventory]: the block's first change, the material changing)
          * holds them: see [Restore]. A register/add change never does; the external edit
          * already decided what became of the items (dropped, kept, moved).
          */
@@ -969,8 +958,11 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
     companion object {
         private val COMPONENT_JSON = GsonComponentSerializer.gson()
 
-        /** Marker format written by this build; see [formatKey]. */
-        private const val MARKER_FORMAT = 2
+        /** Format of the chunk records this build writes. */
+        private const val RECORD_FORMAT = 1
+
+        /** Start of a record's key in the chunk PDC; x, y and z follow (see [recordKey]). */
+        private const val RECORD_PREFIX = "altered_block_at_"
 
         private fun chunkKey(cx: Int, cz: Int): Long = (cx.toLong() shl 32) or (cz.toLong() and 0xffffffffL)
 
@@ -990,7 +982,7 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
         }
 
         /**
-         * Serializes tile-entity state for cross-session marker restore (signs, containers, etc.).
+         * Serializes tile-entity state for cross-session record restore (signs, containers, etc.).
          * Returns null when there is nothing beyond BlockData to store.
          *
          * Items of every block with an inventory (any [TileStateInventoryHolder]: containers, chiseled

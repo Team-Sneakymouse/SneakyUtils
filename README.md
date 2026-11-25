@@ -7,7 +7,7 @@ This is a live Paper plugin (not a compile-only library). Install the JAR on the
 ## What’s included (v1)
 
 - `TextUtility` — Unicode escape decoding (`\uXXXX` / `\UXXXXXXXX`), legacy `&`/`§` → MiniMessage → Adventure `Component`, plus balanced line wrapping
-- `AlteredBlockManager` — reversible temporary block changes with persistent Marker fallback (scoreboard tag `sneakyutils_altered_block`, PDC keys under `sneakyutils:`); changes can carry causes from the fixed `AlteredBlockCauses` set
+- `AlteredBlockManager` — reversible temporary block changes with a persistent crash fallback in the chunk's PDC (one `sneakyutils:altered_block_at_<x>_<y>_<z>` record per block); changes can carry causes from the fixed `AlteredBlockCauses` set
 - MagicsSpells-ported static helpers under `com.sneakyutils.util`: location/XP/color/params, `BlockUtils`, `EntityPdc` (injectable namespace), attribute/particle/sound/potion name resolution, geometry (`BoundingBox` / `bounds`), `AtomicFiles`, and small Bukkit/stdlib helpers
 - `PlayerUtil` — SCM noformat character names and active character id via optional PAPI, CMI-aware target eligibility, dispatch on-duty checks, and Bukkit account-name lookups; the PAPI reads are cached per player for a few ticks (`player-util.*-cache-ticks`, see [Player helpers](#player-helpers)), with `clearCachedChecks(player)` to drop them
 - `PlayerUtil.conceal(owner, player)` / `reveal(owner, player)` / `isConcealed(player)` (`PlayerConcealment`) — hide a player from everyone, themselves included, without spectator mode or `hidePlayer`. Concealing a player:
@@ -121,10 +121,9 @@ add(Change, boolean applyPhysics, long durationTicks): void
   emptied either (Paper drops it when the jukebox is replaced): on Paper, writing a record back
   updates neighbours even with physics off.
 - Only `apply` takes over a block's inventory, only for the block's first change (the one whose
-  state the marker persists), only when it turns the block into another block type, and only
-  once Paper has accepted the block's recovery marker (spawned before anything else changes; if
-  an `EntitySpawnEvent` listener refuses it, the items are left to Paper, which drops them as
-  the block entity goes, and the change holds none). The change holds items exactly when apply
+  state the chunk record persists), and only when it turns the block into another block type. The
+  record is written before the block, so a block write that throws leaves the items in a record
+  that restores them when the chunk next loads. The change holds items exactly when apply
   emptied them, so a physics callback that breaks the block during apply can't make it hold
   items that already dropped. It empties the block's live inventory after capturing its state,
   so Paper drops nothing on the ground (the
@@ -149,48 +148,44 @@ add(Change, boolean applyPhysics, long durationTicks): void
   change and filled by players): the live items stay and the saved ones drop at the block.
   If another plugin cancels the `ItemSpawnEvent` of such a drop, that item is gone, as it would
   be for Paper's own drop of a broken container's items.
-- Timers are in-memory, not persisted countdowns. Persistent marker recovery remains
-  unchanged: after a crash, orphan markers restore blocks when their entities load.
-- Several changes on one block are kept separately, oldest first, with one marker
+- Timers are in-memory, not persisted countdowns. After a crash, the chunk records restore blocks
+  when their chunks load.
+- Several changes on one block are kept separately, oldest first, with one chunk record
   holding the block's original state. Undoing the **newest** change writes back the
   state it replaced. Undoing an **older** change leaves the world alone and splices it
   out: the change above it takes over its restore state. So an older deadline no longer
   overwrites a newer edit, and the last undo always lands on the original.
-- After a crash, the marker restores the original state; changes and causes are not persisted.
-  Markers carry an `altered_block_format` key; ones written by older builds (without it) are
-  recovered by the exact code those builds used (`applyLegacyTileData`: items written to the
-  state's live inventory, then the state updated), whatever its net effect, and nothing is
-  dropped, since their payload may be items that never left the block.
-- Undoing a block whose chunk unloaded and loaded again removes its marker by UUID. If the
-  marker's entities are not loaded at that moment, it is looked for every tick for 100 ticks and
-  removed once it loads, and if it loads later in this session it is removed without restoring.
-  When the retry gives up, the UUID is forgotten only if the marker's chunk has its entities
-  loaded without it (the marker was deleted, so it can never load); otherwise it is kept. At most
-  4096 are kept: past that the oldest is forgotten with a warning, and that marker restores its
-  block once more if it ever loads.
-- When an undo or crash recovery puts a marker's captured items back, the block entity gets the
-  marker's UUID in its PDC (`altered_block_restored`), written in the same update as the items.
-  A marker that then loads again (a restart after the undo, or a recovery run twice) is removed
-  without writing anything, and an undo whose restore threw stays registered and can be called
-  again without writing the items twice.
+- **Crash fallback.** A block's first change writes a record into its chunk's PDC (key
+  `sneakyutils:altered_block_at_<x>_<y>_<z>`, chunk-relative x and z, world y; a tag container
+  holding `altered_block_format`, `altered_block_id`, `altered_block_data` and, when there is tile
+  data, `altered_block_state`). The chunk PDC is saved in the same chunk write as the block
+  sections, and the record is written and removed in the same tick as the block change and its
+  restore, so whatever state a chunk was last saved in, its records match its blocks.
+- As each chunk loads (and for the chunks already loaded when SneakyUtils enables), records of
+  blocks this session does not track are restored and removed: changes and causes are not
+  persisted, only the original state. Records of tracked blocks (a chunk that unloaded and loaded
+  again while its changes are live) are left to those changes. A malformed record is dropped with
+  an error; one whose restore threw stays and is tried again on the next load.
+- When an undo or crash recovery puts a record's captured items back, the block entity gets the
+  record's id in its PDC (`altered_block_restored`), written in the same update as the items.
+  A record replayed after that (a recovery whose record removal did not happen) writes nothing,
+  and an undo whose restore threw stays registered and can be called again without writing the
+  items twice.
+- **Legacy markers.** Builds before chunk records kept the fallback on a persistent `Marker` entity
+  (scoreboard tag `sneakyutils_altered_block`). This build spawns none, but a marker left by a crash
+  under an older build is still restored when its entities load. Markers with an
+  `altered_block_format` key take the current path; ones without it (older still) are recovered by
+  the exact code those builds used (`applyLegacyTileData`: items written to the state's live
+  inventory, then the state updated), and nothing is dropped, since their payload may be items
+  that never left the block.
 - While `apply` changes a block (until the change is registered) or a block is being restored (an
-  undo, or recovery from its marker), code called back from inside (an `EntitySpawnEvent`,
+  undo, or recovery from its record or marker), code called back from inside (a
   `BlockPhysicsEvent` or displaced item's `ItemSpawnEvent` listener, for example) can't change
   it: an undo of one of its changes is ignored with a warning, and `apply`, `register` or `add`
   on it throws `IllegalStateException`. An apply or restore that threw leaves the block free again.
-- Remaining window: an undo finds its marker not loaded, and the server stops or crashes before
-  the marker's entities load and the 100-tick retry or a load event removes it. On Paper a
-  chunk's entities load with the chunk, which the undo's own block write loads, so this needs
-  the entities to stay unloaded that long (seen most plausibly in `restoreAll` on shutdown,
-  where no retry can run). The note that the marker was removed is only in memory, so after the
-  restart the marker restores once more when it loads:
-  - it writes the original BlockData and tile data again, which is what the undo wrote, so it
-    only overwrites an edit made to that block in between while its entities were not loaded
-    (WorldEdit, another plugin);
-  - for a block whose undo put captured items back, the `altered_block_restored` stamp makes it
-    remove itself without writing anything; but if such an edit replaced the restored
-    container in between, the stamp went with the old block entity and the marker puts the
-    captured items in once more.
+- Remaining window: a multi-block structure across a chunk border (a door, a bed, a tall plant)
+  is saved per chunk, so a crash between the two chunks' saves can restore one half only. Each
+  record restores only its own block, with physics off.
 
 ### Causes
 
@@ -243,7 +238,8 @@ them newest first; blocks come in no particular order.
 Tests cover scheduler deadlines, early/bulk cancellation, stale callbacks, equal
 records, physics flag forwarding, splicing, cause lookup/undo, and untimed compatibility with MockBukkit.
 Live Paper checks still needed: actual neighbor physics, tile-state restoration,
-and crash/restart marker recovery; unit tests are not in-game verification.
+and crash/restart chunk-record recovery (the record saved with the chunk, restored on load);
+unit tests are not in-game verification.
 
 ## Placeholder expansion
 

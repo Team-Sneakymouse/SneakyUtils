@@ -1,6 +1,8 @@
 package com.sneakyutils
 
 import com.sneakyutils.integration.Probe
+import com.sneakyutils.targets.VirtualTargets
+import com.sneakyutils.targets.VirtualTargetsListener
 import com.sneakyutils.triggers.Triggers
 import com.sneakyutils.triggers.service.TriggersCommand
 import com.sneakyutils.triggers.service.TriggerService
@@ -91,6 +93,7 @@ open class SneakyUtils : JavaPlugin() {
             it.start()
         }
         triggers = TriggerService(this, probe).also { it.start() }
+        server.pluginManager.registerEvents(VirtualTargetsListener(), this)
         probe.hook()
         logger.info("SneakyUtils enabled.")
     }
@@ -99,6 +102,7 @@ open class SneakyUtils : JavaPlugin() {
         probe.unhook()
         triggers?.shutdown()
         triggers = null
+        VirtualTargets.clear()
         PlayerCheckCache.active?.shutdown()
         PlayerCheckCache.active = null
         playerConcealment?.shutdown()

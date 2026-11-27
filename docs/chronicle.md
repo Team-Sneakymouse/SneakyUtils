@@ -60,16 +60,29 @@ speech in private places, and it can only apply those rules to `text`. Say who h
 plugin decides that (a chat channel's hearers, the other end of a phone call). `heardBy(emptyList())` means nobody
 heard it; not calling it means you don't know, and the recorder may work it out.
 
+The private-place rule is applied to where the speech happened, so the recorder has to know that place:
+
+- A report on the server thread, made at the moment of speaking (chat, an emote), needs nothing: the recorder reads
+  where the actor stands.
+- A report that comes after the speech (a voice transcript arrives seconds later) gives the position the speaker had
+  while speaking, with `at(...)`. Otherwise speech from inside a private place is stored once the speaker has
+  walked out.
+- A report off the server thread must give the place with `at(world, x, y, z)`. The recorder finishes such a report a
+  tick later and does not trust where the actor stands by then: without a place, the text is not stored.
+
 For speech with a duration, give both ends, to the millisecond if you can: video is cut on these times.
 
 ```java
-ChronicleEvent.of("voice.utterance").actor(player).time(started).until(ended).text(transcript).fire();
+ChronicleEvent.of("voice.utterance").actor(player).time(started).until(ended).at(whereTheySpoke).text(transcript).fire();
 ```
 
 ## Threads and failures
 
 - A report works on any thread. Off the server thread, use the calls that take a UUID (`actorAccount`,
   `targetAccount`, `at(world, x, y, z)`) and read nothing from a live `Player`.
+- Report when it happens. `time` is for a moment a little in the past (the start of an utterance), not for old data:
+  the recorder takes a time more than 24 hours from its own clock for a mistake and stores the event with the
+  current time and no end.
 - A report never throws and never waits for the database. A report with a malformed type is dropped; a malformed
   thing, detail key or name is left out of the report. Each logs one warning for as long as the server runs, so
   watch the log the first time a new report fires on a server with the recorder.

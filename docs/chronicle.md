@@ -35,7 +35,7 @@ Nothing has to be agreed beforehand: add the call where the moment happens, in t
 | `of(type)` | What happened: `<owner>.<what_happened>`, lower case with underscores. The owner is your plugin's id (`sneakyleveling.level_up`) or a shared subject (`chat.message`, `voice.utterance`). **The id is a contract:** readers match on it, so never rename one, and keep its details' meaning stable. |
 | `actor(player)` | Who did it. The recorder stores the account and the character that account wears at that moment, with the character's name. Leave it out when nobody did. |
 | `actorCharacter(characterId)` | The character who did it, by SneakyCharacterManager character id, when you hold no online player (an action stored against a character). |
-| `actorNamed("weather")` | A fixed actor that is not a player: `weather`, `server`, `npc:banker`. Lower case. |
+| `actorNamed("weather")` | A fixed actor that is not a player: `weather`, `server`, `npc:banker`. Lower case. An NPC with a player's body (Citizens, Sentinel) is such an actor too: don't pass its `Player` to `actor` or `target`, or it is stored as an account that never existed. |
 | `target(player)`, `targetCharacter(id)`, `targetNamed(name)` | Who it was done to. Call once per target. |
 | `thing(kind, id)` | A named thing with a history of its own that someone will search for: `thing("orb", 3)`, `thing("plot", plotId)`, `thing("item", sneakyItemsId)`. Use the same kind and id every time. |
 | `detail(key, value)` | A fact about this one event: a string, whole number, decimal or boolean. Keys are lower case with underscores. |

@@ -14,6 +14,8 @@ import org.bukkit.event.HandlerList
  * `fire(...)` helpers, which skip building the event when no plugin listens (HandlerList has no listeners).
  *
  * Maps passed in are copied; the event's maps are unmodifiable.
+ *
+ * ChronicleEvent (its own file) is the report for the admins' record. It differs: it may be fired from any thread.
  */
 
 /** A suspect was arrested, by a paladin player or by something else (null). */

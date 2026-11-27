@@ -18,6 +18,7 @@ This is a live Paper plugin (not a compile-only library). Install the JAR on the
 
   They stay a real entity and stay in the tab list. Each owning plugin counts separately, so one plugin's `reveal` doesn't undo another's. Concealment comes off on quit and when SneakyUtils disables. Used by `WatchEngine` watchers and SneakyPoses sleepers
 - `Toasts.show(player, title, icon, itemModel)` — a toast in the corner of one player's screen (MagicSpells' `toast` effect), through a hidden advancement made once per distinct title and icon and saved by Bukkit, so keep titles to a small fixed set
+- `FontAnimations.play(player, font, durationTicks[, part, startFrame, interval, delay])` — a flipbook of a resource-pack font's glyphs on one player's subtitle, title or action bar (MagicSpells' `fontanimation` effect, same frame numbering: frame 10 is `\uE010`); one per player and part, a new one replaces the old
 - `Waypoints.guide(player, location, path)` — point a player at a place with the server's `findlocation` waypoint; the commands (run as the player) are `waypoints.commands` in SneakyUtils' config
 - `PlaceholderUtil` — optional PlaceholderAPI `setPlaceholders` for consumers that already depend on SneakyUtils (no local PAPI compile dependency required for expansion alone)
 - `DisplayOnlyInventoryHolder` — marker for display-only GUI inventory holders; whole-inventory scans on open (SneakyItems updater, expiration) skip them; the owning plugin must keep real items out of the slots. `DisplayOnlyInventoryHolder.isDisplayOnly(inventory)` checks it

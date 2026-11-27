@@ -2,6 +2,7 @@ import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import java.time.Instant
 import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
+import java.util.zip.ZipFile
 
 plugins {
     kotlin("jvm") version "2.3.21"
@@ -65,6 +66,14 @@ dependencies {
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
 
+// The plugin jar bundles runtimeClasspath, and consumers compile against that jar. kotlin-stdlib brings
+// org.jetbrains:annotations:13.0, whose @NotNull has no TYPE_USE target and would shadow the consumer's own
+// annotations library. Nothing loads these classes at runtime, so they stay out of the jar. This exclude is
+// on the resolved classpath only: the published POM and module metadata are unchanged.
+configurations.runtimeClasspath {
+    exclude(group = "org.jetbrains", module = "annotations")
+}
+
 kotlin {
     jvmToolchain(25)
 }
@@ -119,8 +128,35 @@ tasks {
         commandLine("bash", "scripts/publish-preflight.sh", rootDir.absolutePath)
     }
 
+    val verifyJarContents by registering {
+        group = "verification"
+        description = "Fail when the plugin jar bundles org.jetbrains annotations or lacks the Kotlin stdlib."
+        val pluginJar = jar.flatMap { it.archiveFile }
+        inputs.file(pluginJar)
+        doLast {
+            val entries = ZipFile(pluginJar.get().asFile).use { zip ->
+                zip.entries().asSequence().map { it.name }.toList()
+            }
+            val annotations = entries.filter {
+                it.startsWith("org/jetbrains/annotations/") || it.startsWith("org/intellij/lang/annotations/")
+            }
+            if (annotations.isNotEmpty()) {
+                throw GradleException(
+                    "${pluginJar.get().asFile.name} bundles ${annotations.size} annotation entries, e.g. " +
+                        "${annotations.first()}. They shadow the consumer's org.jetbrains:annotations; " +
+                        "see the runtimeClasspath exclude."
+                )
+            }
+            if ("kotlin/Unit.class" !in entries) {
+                throw GradleException(
+                    "${pluginJar.get().asFile.name} lacks the Kotlin stdlib, which dependent plugins use at runtime."
+                )
+            }
+        }
+    }
+
     check {
-        dependsOn(publishPreflight)
+        dependsOn(publishPreflight, verifyJarContents)
     }
 }
 

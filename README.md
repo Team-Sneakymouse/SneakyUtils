@@ -223,9 +223,9 @@ bulk.start();                        // bulk.undo() restores early
   later `apply` / `register` / `add` changes leaves its bulk change first and becomes a per-block change under
   the bulk change's name, so undos unwind to the original either way.
 - **Crash fallback.** Each chunk holds a bulk change's records as append-only segments,
-  `sneakyutils:altered_bulk_<id>_<n>` (a tag container: `altered_bulk_format`, `altered_bulk_palette` (block data
-  strings), `altered_bulk_pos` (packed chunk-local positions, `(y + 4096) << 8 | x << 4 | z`) and
-  `altered_bulk_ft` (palette index before `<< 16 |` after)). At the end of every tick that wrote blocks in a chunk,
+  `sneakyutils:altered_bulk_<id>_<n>` (a tag container: `altered_bulk_format`, `altered_bulk_pos` (packed
+  chunk-local positions, `(y + 4096) << 8 | x << 4 | z`) and `altered_bulk_ft` (palette index before `<< 16 |`
+  after)), plus `sneakyutils:altered_bulk_<id>_p`, the palette (block data strings), rewritten when it grows. At the end of every tick that wrote blocks in a chunk,
   one segment with just those blocks is added, in the same tick as the writes. Restores and mends don't rewrite
   them: an entry left behind is harmless, and the chunk's segments are removed once it holds nothing. A record no live bulk change owns (after a crash or restart) is restored when its chunk loads,
   block by block where the block still holds what was written. On disable, bulk blocks in loaded chunks go

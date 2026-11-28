@@ -98,6 +98,8 @@ class BulkChange internal constructor(
         var flushedUpTo = 0
         /** Record segments written for this chunk (keys `<record key>_<n>`). */
         var segments = 0
+        /** Palette entries in this chunk's palette record (key `<record key>_p`). */
+        var paletteWritten = 0
 
         fun append(local: Int, f: Int, t: Int): Int {
             if (size == pos.size) {
@@ -341,6 +343,8 @@ class BulkChange internal constructor(
 
     internal fun recordKey(segment: Int): NamespacedKey = NamespacedKey(store.plugin, "$RECORD_PREFIX${id}_$segment")
 
+    internal fun paletteKey(): NamespacedKey = NamespacedKey(store.plugin, "$RECORD_PREFIX${id}_p")
+
     /**
      * Brings [part]'s chunk records up to date: the entries written since the last call go into a new segment
      * (append-only, so each tick costs only what it wrote), and every segment goes once the chunk holds nothing.
@@ -351,7 +355,9 @@ class BulkChange internal constructor(
         val pdc = world.getChunkAt(part.cx, part.cz).persistentDataContainer
         if (part.heldCount == 0 || state == State.DONE) {
             for (n in 0 until part.segments) pdc.remove(recordKey(n))
+            pdc.remove(paletteKey())
             part.segments = 0
+            part.paletteWritten = 0
             part.flushedUpTo = part.size
             return
         }
@@ -370,10 +376,14 @@ class BulkChange internal constructor(
             k++
         }
         part.flushedUpTo = part.size
+        if (part.paletteWritten < palette.size) {
+            // the palette only grows: rewritten when this chunk's copy is behind (a few dozen strings)
+            pdc.set(paletteKey(), PersistentDataType.LIST.strings(), palette.map { it.asString })
+            part.paletteWritten = palette.size
+        }
         val key = recordKey(part.segments++)
         val record = pdc.adapterContext.newPersistentDataContainer()
         record.set(store.formatKey, PersistentDataType.INTEGER, RECORD_FORMAT)
-        record.set(store.paletteKey, PersistentDataType.LIST.strings(), palette.map { it.asString })
         record.set(store.posKey, PersistentDataType.INTEGER_ARRAY, pos)
         record.set(store.ftKey, PersistentDataType.INTEGER_ARRAY, ft)
         pdc.set(key, PersistentDataType.TAG_CONTAINER, record)
@@ -400,7 +410,6 @@ class BulkChange internal constructor(
 /** Every live [BulkChange], the shared queue that runs them and the chunk index the manager's lookups use. */
 internal class BulkChanges(val manager: AlteredBlockManager, val plugin: JavaPlugin) {
     val formatKey = NamespacedKey(plugin, "altered_bulk_format")
-    val paletteKey = NamespacedKey(plugin, "altered_bulk_palette")
     val posKey = NamespacedKey(plugin, "altered_bulk_pos")
     val ftKey = NamespacedKey(plugin, "altered_bulk_ft")
 
@@ -541,35 +550,40 @@ internal class BulkChanges(val manager: AlteredBlockManager, val plugin: JavaPlu
         }
         val pdc = chunk.persistentDataContainer
         val keys = pdc.keys.filter { it.namespace == formatKey.namespace && it.key.startsWith(BulkChange.RECORD_PREFIX) }
-        for (key in keys) {
-            val id = try { UUID.fromString(key.key.removePrefix(BulkChange.RECORD_PREFIX).substringBeforeLast('_')) } catch (_: IllegalArgumentException) { null }
+        for ((idText, ofBulk) in keys.groupBy { it.key.removePrefix(BulkChange.RECORD_PREFIX).substringBeforeLast('_') }) {
+            val id = try { UUID.fromString(idText) } catch (_: IllegalArgumentException) { null }
             if (id != null && isLive(id)) continue
             try {
-                restoreRecord(chunk, pdc, key)
+                restoreRecords(chunk, pdc, ofBulk)
             } catch (e: RuntimeException) {
-                plugin.logger.severe("Failed to restore bulk record ${key.key} in chunk ${chunk.x}, ${chunk.z}: ${e.message}")
+                plugin.logger.severe("Failed to restore bulk change $idText in chunk ${chunk.x}, ${chunk.z}: ${e.message}")
             }
-            pdc.remove(key)
+            for (key in ofBulk) pdc.remove(key)
         }
     }
 
-    private fun restoreRecord(chunk: Chunk, pdc: PersistentDataContainer, key: NamespacedKey) {
-        val record = try { pdc.get(key, PersistentDataType.TAG_CONTAINER) } catch (_: IllegalArgumentException) { null } ?: return
-        val palette = record.get(paletteKey, PersistentDataType.LIST.strings()) ?: return
-        val pos = record.get(posKey, PersistentDataType.INTEGER_ARRAY) ?: return
-        val ft = record.get(ftKey, PersistentDataType.INTEGER_ARRAY) ?: return
+    /** Restores a bulk change's segments in [chunk], newest first, with the chunk's palette record. */
+    private fun restoreRecords(chunk: Chunk, pdc: PersistentDataContainer, keys: List<NamespacedKey>) {
+        val paletteKey = keys.firstOrNull { it.key.endsWith("_p") } ?: return
+        val palette = pdc.get(paletteKey, PersistentDataType.LIST.strings()) ?: return
         val data = palette.map { s -> try { Bukkit.createBlockData(s) } catch (_: IllegalArgumentException) { null } }
+        val segments = keys.filter { it != paletteKey }.sortedByDescending { it.key.substringAfterLast('_').toIntOrNull() ?: -1 }
         var restored = 0
-        for (k in pos.indices.reversed()) {
-            if (k >= ft.size) continue
-            val l = pos[k]
-            val from = data.getOrNull(ft[k] ushr 16) ?: continue
-            val to = data.getOrNull(ft[k] and 0xFFFF) ?: continue
-            val block = chunk.getBlock((l shr 4) and 15, (l shr 8) - BulkChange.Y_OFFSET, l and 15)
-            if (manager.isTracked(block)) continue
-            if (block.blockData == to) {
-                block.setBlockData(from, false)
-                restored++
+        for (key in segments) {
+            val record = try { pdc.get(key, PersistentDataType.TAG_CONTAINER) } catch (_: IllegalArgumentException) { null } ?: continue
+            val pos = record.get(posKey, PersistentDataType.INTEGER_ARRAY) ?: continue
+            val ft = record.get(ftKey, PersistentDataType.INTEGER_ARRAY) ?: continue
+            for (k in pos.indices.reversed()) {
+                if (k >= ft.size) continue
+                val l = pos[k]
+                val from = data.getOrNull(ft[k] ushr 16) ?: continue
+                val to = data.getOrNull(ft[k] and 0xFFFF) ?: continue
+                val block = chunk.getBlock((l shr 4) and 15, (l shr 8) - BulkChange.Y_OFFSET, l and 15)
+                if (manager.isTracked(block)) continue
+                if (block.blockData == to) {
+                    block.setBlockData(from, false)
+                    restored++
+                }
             }
         }
         plugin.logger.info("Restored $restored block(s) of a bulk change left by a crash in chunk ${chunk.x}, ${chunk.z}.")

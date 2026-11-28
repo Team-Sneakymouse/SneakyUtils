@@ -94,6 +94,10 @@ class BulkChange internal constructor(
         var heldCount = 0
         val index = IntIntMap()
         var dirty = false
+        /** Entries below this are in the chunk's record segments already. */
+        var flushedUpTo = 0
+        /** Record segments written for this chunk (keys `<record key>_<n>`). */
+        var segments = 0
 
         fun append(local: Int, f: Int, t: Int): Int {
             if (size == pos.size) {
@@ -275,9 +279,13 @@ class BulkChange internal constructor(
         if (!part.held.get(e)) return
         part.held.clear(e)
         part.heldCount--
-        part.dirty = true
         held--
-        store.dirty(part)
+        // records only grow while writing; a released entry left in one is harmless (a crash restore only touches
+        // a block that still holds what was written), and the chunk's segments go once it holds nothing
+        if (part.heldCount == 0) {
+            part.dirty = true
+            store.dirty(part)
+        }
         if (held == 0 && perBlock.isEmpty() && state == State.WRITTEN) {
             restoreTask?.cancel()
             restoreTask = null
@@ -331,28 +339,38 @@ class BulkChange internal constructor(
         return Triple(part.cx * 16 + ((l shr 4) and 15), (l shr 8) - Y_OFFSET, part.cz * 16 + (l and 15))
     }
 
-    internal fun recordKey(): NamespacedKey = NamespacedKey(store.plugin, "$RECORD_PREFIX$id")
+    internal fun recordKey(segment: Int): NamespacedKey = NamespacedKey(store.plugin, "$RECORD_PREFIX${id}_$segment")
 
-    /** Rewrites [part]'s chunk record from what it holds (removes it when nothing). */
+    /**
+     * Brings [part]'s chunk records up to date: the entries written since the last call go into a new segment
+     * (append-only, so each tick costs only what it wrote), and every segment goes once the chunk holds nothing.
+     */
     internal fun writeRecord(part: Part) {
         part.dirty = false
         if (!world.isChunkLoaded(part.cx, part.cz)) return
         val pdc = world.getChunkAt(part.cx, part.cz).persistentDataContainer
-        val key = recordKey()
         if (part.heldCount == 0 || state == State.DONE) {
-            pdc.remove(key)
+            for (n in 0 until part.segments) pdc.remove(recordKey(n))
+            part.segments = 0
+            part.flushedUpTo = part.size
             return
         }
-        val pos = IntArray(part.heldCount)
-        val ft = IntArray(part.heldCount)
+        val count = (part.flushedUpTo until part.size).count { part.held.get(it) }
+        if (count == 0) {
+            part.flushedUpTo = part.size
+            return
+        }
+        val pos = IntArray(count)
+        val ft = IntArray(count)
         var k = 0
-        var e = part.held.nextSetBit(0)
-        while (e >= 0) {
+        for (e in part.flushedUpTo until part.size) {
+            if (!part.held.get(e)) continue
             pos[k] = part.pos[e]
             ft[k] = (part.from[e].code shl 16) or part.to[e].code
             k++
-            e = part.held.nextSetBit(e + 1)
         }
+        part.flushedUpTo = part.size
+        val key = recordKey(part.segments++)
         val record = pdc.adapterContext.newPersistentDataContainer()
         record.set(store.formatKey, PersistentDataType.INTEGER, RECORD_FORMAT)
         record.set(store.paletteKey, PersistentDataType.LIST.strings(), palette.map { it.asString })
@@ -524,7 +542,7 @@ internal class BulkChanges(val manager: AlteredBlockManager, val plugin: JavaPlu
         val pdc = chunk.persistentDataContainer
         val keys = pdc.keys.filter { it.namespace == formatKey.namespace && it.key.startsWith(BulkChange.RECORD_PREFIX) }
         for (key in keys) {
-            val id = try { UUID.fromString(key.key.removePrefix(BulkChange.RECORD_PREFIX)) } catch (_: IllegalArgumentException) { null }
+            val id = try { UUID.fromString(key.key.removePrefix(BulkChange.RECORD_PREFIX).substringBeforeLast('_')) } catch (_: IllegalArgumentException) { null }
             if (id != null && isLive(id)) continue
             try {
                 restoreRecord(chunk, pdc, key)

@@ -189,17 +189,30 @@ class BulkChangeTest {
         assertEquals(1, bulkRecords(blocks[0]).size)
         // a record whose bulk change no longer lives (the server crashed): restore on chunk load
         val pdc = blocks[0].chunk.persistentDataContainer
-        val key = bulkRecords(blocks[0]).single()
+        val key = bulkRecords(blocks[0]).single()   // one segment: all five written in one tick
         val saved = pdc.get(key, org.bukkit.persistence.PersistentDataType.TAG_CONTAINER)!!
         bulk.undo()
         server.scheduler.performOneTick()
         for (b in blocks) b.type = Material.AIR
         blocks[1].type = Material.OAK_PLANKS
-        pdc.set(org.bukkit.NamespacedKey(plugin, "altered_bulk_00000000-0000-0000-0000-000000000001"),
+        pdc.set(org.bukkit.NamespacedKey(plugin, "altered_bulk_00000000-0000-0000-0000-000000000001_0"),
             org.bukkit.persistence.PersistentDataType.TAG_CONTAINER, saved)
         server.pluginManager.callEvent(ChunkLoadEvent(blocks[0].chunk, false))
         assertEquals(Material.OAK_PLANKS, blocks[1].type, "a block that isn't what was written stays")
         assertTrue(blocks.filterIndexed { i, _ -> i != 1 }.all { it.type == Material.STONE })
+        assertTrue(bulkRecords(blocks[0]).isEmpty())
+    }
+
+    @Test
+    fun recordsGrowBySegmentsAndGoWhenTheChunkIsEmpty() {
+        val (bulk, blocks) = line(15)   // budget 10: two ticks, two segments in one chunk
+        server.scheduler.performTicks(2)
+        assertEquals(2, bulkRecords(blocks[0]).size)
+        manager.undoByCause(blocks[0], AlteredBlockCauses.DAMAGE, false)
+        server.scheduler.performOneTick()
+        assertEquals(2, bulkRecords(blocks[0]).size, "a mend doesn't rewrite them")
+        bulk.undo()
+        server.scheduler.performTicks(2)
         assertTrue(bulkRecords(blocks[0]).isEmpty())
     }
 

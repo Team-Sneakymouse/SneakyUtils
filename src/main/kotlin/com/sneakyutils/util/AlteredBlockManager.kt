@@ -81,6 +81,49 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
     /** Tracked blocks by cause: each block with at least one active change carrying that cause. */
     private val blocksByCause: MutableMap<String, MutableSet<Block>> = HashMap()
     private val logger: Logger = plugin.logger
+
+    /** Live bulk changes ([bulk]) and the shared queue that writes and restores them. */
+    private val bulks = BulkChanges(this, plugin)
+
+    /** Blocks a tick all bulk changes together may write or restore (config `altered-blocks.bulk-blocks-per-tick`). */
+    val bulkBlocksPerTick: Int
+        get() = plugin.config.getInt("altered-blocks.bulk-blocks-per-tick", 5000).coerceAtLeast(1)
+
+    /**
+     * A new [BulkChange] for many blocks at once (a crater): configure it, add positions, start it. Cheaper
+     * than [apply] per block, paced by the shared [bulkBlocksPerTick] budget. Throws [IllegalArgumentException]
+     * on an unknown cause.
+     */
+    fun bulk(internalName: String, world: World, causes: Set<String>): BulkChange {
+        bulks.blocksPerTick = bulkBlocksPerTick
+        return bulks.create(internalName, world, causes)
+    }
+
+    /** [bulk] with a single [cause]. */
+    fun bulk(internalName: String, world: World, cause: String): BulkChange = bulk(internalName, world, setOf(cause))
+
+    /** Live bulk changes (started and not yet done). */
+    fun bulkChanges(): List<BulkChange> = ArrayList(bulks.all)
+
+    internal fun isBeingRestored(block: Block): Boolean = block in restoring
+
+    internal fun hasPerBlockChanges(block: Block): Boolean = alteredBlocks.containsKey(block)
+
+    internal fun whileBulkRestoring(block: Block, action: () -> Unit) = whileRestoring(block, action)
+
+    /** A block leaving its bulk change as a per-block change (see [BulkChanges.handOn]). */
+    internal fun addHandedOn(change: Change) = addChange(change, takesInventory = false, appliedRecordId = null)
+
+    /** The per-block view of a bulk-held block: its bulk change as a [Change]. */
+    private fun bulkView(slot: BulkChanges.Slot, block: Block): Change =
+        Change(slot.bulk.internalName, block, slot.bulk.palette[slot.part.from[slot.entry].code].clone(), block.state, slot.bulk.causes)
+
+    private fun bulkBlock(bulk: BulkChange, part: BulkChange.Part, e: Int): Block {
+        val (x, y, z) = bulk.worldPos(part, e)
+        return bulk.world.getBlockAt(x, y, z)
+    }
+
+    private fun bulkMatchesCauses(bulk: BulkChange, matching: Set<String>) = bulk.causes.any { it in matching }
     private val blockDataKey = NamespacedKey(plugin, "altered_block_data")
     private val blockStateKey = NamespacedKey(plugin, "altered_block_state")
     private val worldKey = NamespacedKey(plugin, "altered_block_world")
@@ -132,6 +175,7 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
      */
     fun add(change: Change) {
         checkNotRestoring(change.block)
+        bulks.handOn(change.block)
         addChange(change, takesInventory = false, appliedRecordId = null)
     }
 
@@ -217,6 +261,7 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
     ): Change {
         AlteredBlockCauses.requireValid(causes)
         checkNotRestoring(block)
+        bulks.handOn(block)
         val fromData = block.blockData
         val fromState = block.state
         val first = !isTracked(block)
@@ -360,6 +405,7 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
      * when its chunk next loads (see [restoreChunk]).
      */
     fun restoreAll() {
+        bulks.restoreLoaded()
         val changes = alteredBlocks.values.flatMap { it.changes }
         for (change in changes.reversed()) {
             try {
@@ -370,7 +416,7 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
         }
     }
 
-    fun isTracked(block: Block): Boolean = alteredBlocks.containsKey(block)
+    fun isTracked(block: Block): Boolean = alteredBlocks.containsKey(block) || bulks.slotAt(block) != null
 
     /**
      * Runs [listener] once, on the server thread, right after the active [change] has been undone:
@@ -414,8 +460,23 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
      * Every active change under [internalName], oldest first within each block; blocks in no
      * particular order. Cost grows with the blocks that have such a change, not every tracked block.
      */
-    fun getByInternalName(internalName: String): List<Change> =
-        collectChanges(blocksByName[internalName]) { it.internalName == internalName }
+    fun getByInternalName(internalName: String): List<Change> {
+        val result = collectChanges(blocksByName[internalName]) { it.internalName == internalName }
+        for (bulk in bulks.all) if (bulk.internalName == internalName) addBulkViews(bulk, result)
+        return result
+    }
+
+    /** One [Change] view per block [bulk] holds (each with a block-state snapshot: costly for big ones). */
+    private fun addBulkViews(bulk: BulkChange, into: MutableList<Change>) {
+        for (part in bulk.parts) {
+            var e = part.held.nextSetBit(0)
+            while (e >= 0) {
+                val block = bulkBlock(bulk, part, e)
+                into += Change(bulk.internalName, block, bulk.palette[part.from[e].code].clone(), block.state, bulk.causes)
+                e = part.held.nextSetBit(e + 1)
+            }
+        }
+    }
 
     /** [getByCause] for a single [cause]. */
     fun getByCause(cause: String): List<Change> = getByCause(setOf(cause))
@@ -429,10 +490,12 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
         val matching = AlteredBlockCauses.matching(causes)
         val blocks = LinkedHashSet<Block>()
         for (cause in matching) blocksByCause[cause]?.let { blocks.addAll(it) }
-        return collectChanges(blocks) { change -> change.causes.any { it in matching } }
+        val result = collectChanges(blocks) { change -> change.causes.any { it in matching } }
+        for (bulk in bulks.all) if (bulkMatchesCauses(bulk, matching)) addBulkViews(bulk, result)
+        return result
     }
 
-    private inline fun collectChanges(blocks: Collection<Block>?, filter: (Change) -> Boolean): List<Change> {
+    private inline fun collectChanges(blocks: Collection<Block>?, filter: (Change) -> Boolean): MutableList<Change> {
         val result = ArrayList<Change>()
         if (blocks == null) return result
         for (block in blocks) {
@@ -446,7 +509,7 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
 
     /** Every active change on [block], oldest first. */
     fun getByBlock(block: Block): List<Change> {
-        val alteredBlock = alteredBlocks[block] ?: return emptyList()
+        val alteredBlock = alteredBlocks[block] ?: return bulks.slotAt(block)?.let { listOf(bulkView(it, block)) } ?: emptyList()
         return ArrayList(alteredBlock.changes)
     }
 
@@ -463,7 +526,7 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
         internalNames: Collection<String>,
     ): List<Block> {
         if (internalNames.isEmpty()) return ArrayList()
-        return blocksInBox(world, minX, minY, minZ, maxX, maxY, maxZ) { it.internalName in internalNames }
+        return blocksInBox(world, minX, minY, minZ, maxX, maxY, maxZ, { it.internalName in internalNames }) { it.internalName in internalNames }
     }
 
     /** [getBlocksInBoxByCause] for a single [cause]. */
@@ -482,15 +545,20 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
     ): List<Block> {
         val matching = AlteredBlockCauses.matching(causes)
         if (matching.isEmpty()) return ArrayList()
-        return blocksInBox(world, minX, minY, minZ, maxX, maxY, maxZ) { change -> change.causes.any { it in matching } }
+        return blocksInBox(world, minX, minY, minZ, maxX, maxY, maxZ, { bulkMatchesCauses(it, matching) }) { change -> change.causes.any { it in matching } }
     }
 
     private fun blocksInBox(
         world: World, minX: Int, minY: Int, minZ: Int, maxX: Int, maxY: Int, maxZ: Int,
+        bulkMatches: (BulkChange) -> Boolean,
         matches: (Change) -> Boolean,
     ): List<Block> {
         val result = ArrayList<Block>()
         if (minX > maxX || minY > maxY || minZ > maxZ) return result
+        bulks.forEachHeldIn(world, minX shr 4, maxX shr 4, minZ shr 4, maxZ shr 4, bulkMatches) { bulk, part, e ->
+            val (x, y, z) = bulk.worldPos(part, e)
+            if (x in minX..maxX && y in minY..maxY && z in minZ..maxZ) result.add(world.getBlockAt(x, y, z))
+        }
         val chunks = blocksByChunk[world.uid] ?: return result
         val minCx = minX shr 4
         val maxCx = maxX shr 4
@@ -533,7 +601,9 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
      * Undoes every change registered under [internalName] (newest first per block).
      */
     fun undoAll(internalName: String, applyPhysics: Boolean) {
-        undoNewestFirst(getByInternalName(internalName), applyPhysics)
+        // bulk changes under the name restore through the shared queue, rim to centre
+        for (bulk in bulks.all.toList()) if (bulk.internalName == internalName) bulk.undo()
+        undoNewestFirst(collectChanges(blocksByName[internalName]) { it.internalName == internalName }, applyPhysics)
     }
 
     /** [undoAllByCause] for a single [cause]. */
@@ -547,7 +617,12 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
      * later restores the state from before the undone changes.
      */
     fun undoAllByCause(causes: Collection<String>, applyPhysics: Boolean) {
-        undoNewestFirst(getByCause(causes), applyPhysics)
+        val matching = AlteredBlockCauses.matching(causes)
+        // bulk changes with the causes restore through the shared queue, rim to centre
+        for (bulk in bulks.all.toList()) if (bulkMatchesCauses(bulk, matching)) bulk.undo()
+        val blocks = LinkedHashSet<Block>()
+        for (cause in matching) blocksByCause[cause]?.let { blocks.addAll(it) }
+        undoNewestFirst(collectChanges(blocks) { change -> change.causes.any { it in matching } }, applyPhysics)
     }
 
     /** [undoByCause] for a single [cause]. */
@@ -560,6 +635,12 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
      */
     fun undoByCause(block: Block, causes: Collection<String>, applyPhysics: Boolean): Boolean {
         val matching = AlteredBlockCauses.matching(causes)
+        if (!alteredBlocks.containsKey(block)) {
+            val slot = bulks.slotAt(block) ?: return false
+            if (!bulkMatchesCauses(slot.bulk, matching)) return false
+            slot.bulk.mend(slot.part, slot.entry)
+            return true
+        }
         val changes = alteredBlocks[block]?.changes?.filter { change -> change.causes.any { it in matching } }
         if (changes.isNullOrEmpty()) return false
         undoNewestFirst(changes, applyPhysics)
@@ -576,7 +657,9 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
      */
     fun previewUndoByCause(block: Block, causes: Collection<String>): BlockData? {
         val matching = AlteredBlockCauses.matching(causes)
-        val alteredBlock = alteredBlocks[block] ?: return null
+        val alteredBlock = alteredBlocks[block] ?: return bulks.slotAt(block)
+            ?.takeIf { bulkMatchesCauses(it.bulk, matching) }
+            ?.let { it.bulk.palette[it.part.from[it.entry].code].clone() }
         val changes = alteredBlock.changes
         if (changes.none { change -> change.causes.any { it in matching } }) return null
         val keptTop = changes.indexOfLast { change -> change.causes.none { it in matching } }
@@ -601,7 +684,12 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
             return
         }
         pendingUndos.remove(change)?.cancel()
-        val alteredBlock = alteredBlocks[block] ?: return
+        val alteredBlock = alteredBlocks[block] ?: run {
+            // a bulk view (getByBlock, getByCause): mend that block of its bulk change
+            val slot = bulks.slotAt(block)
+            if (slot != null && slot.bulk.internalName == change.internalName) slot.bulk.mend(slot.part, slot.entry)
+            return
+        }
         val index = alteredBlock.indexOf(change)
         if (index < 0) return
         val expected = preservedData.remove(change)
@@ -797,6 +885,7 @@ class AlteredBlockManager(private val plugin: JavaPlugin) {
      * again the next time the chunk loads.
      */
     fun restoreChunk(chunk: Chunk) {
+        bulks.chunkLoaded(chunk)
         val pdc = chunk.persistentDataContainer
         val namespace = blockDataKey.namespace
         val keys = pdc.keys.filter { it.namespace == namespace && it.key.startsWith(RECORD_PREFIX) }

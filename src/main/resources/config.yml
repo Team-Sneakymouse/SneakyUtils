@@ -17,3 +17,7 @@ waypoints:
   commands:
     - "findlocation_path %path%"
     - "findlocation %world% %x% %y% %z% 0 0"
+altered-blocks:
+  # Blocks a tick all bulk changes together (AlteredBlockManager.bulk: craters and other big area effects) may
+  # write or put back. Lower spreads a big blast over more ticks.
+  bulk-blocks-per-tick: 5000

@@ -8,6 +8,7 @@ This is a live Paper plugin (not a compile-only library). Install the JAR on the
 
 - `TextUtility` — Unicode escape decoding (`\uXXXX` / `\UXXXXXXXX`), legacy `&`/`§` → MiniMessage → Adventure `Component`, plus balanced line wrapping
 - `AlteredBlockManager` — reversible temporary block changes with a persistent crash fallback in the chunk's PDC (one `sneakyutils:altered_block_at_<x>_<y>_<z>` record per block); changes can carry causes from the fixed `AlteredBlockCauses` set
+- `AlteredBlockManager.bulk(...)` (`BulkChange`) — many temporary block changes as one (craters, area effects): a few bytes a block and one record per chunk instead of one per block, written and restored through one queue shared by every bulk change (`altered-blocks.bulk-blocks-per-tick`, default 5000); wrenches and repair tools see and mend bulk blocks like any other
 - MagicsSpells-ported static helpers under `com.sneakyutils.util`: location/XP/color/params, `BlockUtils`, `EntityPdc` (injectable namespace), attribute/particle/sound/potion name resolution, geometry (`BoundingBox` / `bounds`), `AtomicFiles`, and small Bukkit/stdlib helpers
 - `PlayerUtil` — SCM noformat character names and active character id via optional PAPI, CMI-aware target eligibility, dispatch on-duty checks, and Bukkit account-name lookups; the PAPI reads are cached per player for a few ticks (`player-util.*-cache-ticks`, see [Player helpers](#player-helpers)), with `clearCachedChecks(player)` to drop them
 - `PlayerUtil.conceal(owner, player)` / `reveal(owner, player)` / `isConcealed(player)` (`PlayerConcealment`) — hide a player from everyone, themselves included, without spectator mode or `hidePlayer`. Concealing a player:
@@ -188,6 +189,46 @@ add(Change, boolean applyPhysics, long durationTicks): void
 - Remaining window: a multi-block structure across a chunk border (a door, a bed, a tall plant)
   is saved per chunk, so a crash between the two chunks' saves can restore one half only. Each
   record restores only its own block, with physics off.
+
+### Bulk changes (craters)
+
+For thousands of blocks at once use `bulk(...)` instead of `apply` per block. A `Change` per block (a
+block-state snapshot, index entries, its own chunk record) is too heavy at that scale: a radius-50 crater
+(about 500,000 blocks) cost 645 MB of heap and 100 MB of chunk records. A bulk change keeps a packed position
+and two palette indexes per block and one record per chunk.
+
+```java
+BulkChange bulk = manager.bulk("myplugin:crater", world, AlteredBlockCauses.EXPLOSION)
+    .target(block -> block.getType().isAir() ? null : Material.AIR.createBlockData())  // null: leave it
+    .restoreAfter(180 * 20)          // ticks after the last block is written; without it only undo() restores
+    .onWritten(() -> {}).onRestored(() -> {});
+for (/* positions, centre outwards */) bulk.add(x, y, z);
+bulk.start();                        // bulk.undo() restores early
+```
+
+- **Pacing.** Every bulk change on the server shares one queue: `altered-blocks.bulk-blocks-per-tick` blocks
+  a tick (default 5000), split between the ones at work, for writing and restoring alike. Positions are
+  written in the order they were added and restored in reverse (a crater burns out from the centre and fills
+  back in from the rim). `target` runs when a block's turn comes, on the block as it is then.
+- **What it won't touch.** Blocks with block-entity data (chests, signs, ...) are never written in bulk, and
+  positions in unloaded chunks are skipped while writing (a bulk change never loads chunks; hold tickets if
+  the area must be loaded). A restore leaves a block that no longer holds what was written (someone built
+  there). A block due for restore in an unloaded chunk is put back when the chunk loads.
+- **To everyone else it is ordinary altered blocks.** `isTracked`, `getByBlock` (a `Change` view whose
+  `undo` mends that block), `getBlocksInBox(ByCause)`, `undoByCause`, `previewUndoByCause`, `getByCause`
+  and `getByInternalName` include bulk blocks, so the paladin wrench and repair tools mend them one by one.
+  `undoAll` / `undoAllByCause` start the matching bulk changes' paced restore. `getByCause` and
+  `getByInternalName` build a `Change` per bulk block: avoid them on big bulk changes.
+- **Stacking.** A block that already had changes is written as a per-block change on top of them. A block a
+  later `apply` / `register` / `add` changes leaves its bulk change first and becomes a per-block change under
+  the bulk change's name, so undos unwind to the original either way.
+- **Crash fallback.** Each chunk holds one record per bulk change, `sneakyutils:altered_bulk_<id>` (a tag
+  container: `altered_bulk_format`, `altered_bulk_palette` (block data strings), `altered_bulk_pos` (packed
+  chunk-local positions, `(y + 4096) << 8 | x << 4 | z`) and `altered_bulk_ft` (palette index before `<< 16 |`
+  after)). It is rewritten at the end of every tick that changed what the chunk holds, in the same tick as the
+  block writes. A record no live bulk change owns (after a crash or restart) is restored when its chunk loads,
+  block by block where the block still holds what was written. On disable, bulk blocks in loaded chunks go
+  back at once; the rest are left to their records.
 
 ### Causes
 
